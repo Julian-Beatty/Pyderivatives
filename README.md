@@ -70,15 +70,5 @@ Each module is designed to make advanced academic methods *practical, modular, a
 # Sample Plots
 
 ## Evolutionary Mixtures vs Natural Cubic Splines
-Kernel Ridge Regression is used to estimate the implied volatility (IV) surface.
-<img width="720" alt="Kernel Ridge Regression" src="Images/GLD KRR.png" />
-
-## Local Linear Regression
-Locally linear regression provides a nonparametric fit to the IV surface.
-<img width="720" alt="Local Linear Regression" src="Images/Local Linear GLD.png" />
-
-## Quadratic Polynomial Fit
-A quadratic polynomial is used to approximate the shape of the IV surface.
-<img width="720" alt="Quadratic Polynomial Fit" src="Images/Quadratic GLD.png" />
-
-
+Evolutionary Mixtures are compared to natural cubic splines
+<img width="720" alt="Kernel Ridge Regression" src="Images/Splines_Evolutions.png" />
