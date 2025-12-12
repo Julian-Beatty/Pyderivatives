@@ -3,6 +3,7 @@
 ## **Overview**
 This repository provides an easy-to-use toolbox for option pricing, with a strong emphasis on implementing state-of-the-art models from leading journals in finance, econometrics, and applied mathematics.  
 Each module is designed to make advanced academic methods *practical, modular, and directly usable* for research and production.
+<img width="720" alt="Kernel Ridge Regression" src="Call_Surface_Cleaner/GLD_late_RND.png" />
 
 ---
 
