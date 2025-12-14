@@ -5,13 +5,13 @@ This repository provides an easy-to-use toolbox for option pricing, with a stron
 Each module is designed to make advanced academic methods *practical, modular, and directly usable* for research and production. Notable features include risk neutral density surface estimation, and IV/Call surface estimation.
 
 ## **Risk Neutral Density Surface Estimation**
-<img width="720" alt="Kernel Ridge Regression" src="Images/Chevron_surface_comparison.png" />
----
-## **Full Call Surface Estimation**
 <img width="720" alt="Kernel Ridge Regression" src="Images/RND_Multi_curve.png" />
 
 ---
+## **Full Call Surface Estimation**
+<img width="720" alt="Kernel Ridge Regression" src="Images/Chevron_surface_comparison.png" />
 
+---
 ## **Implemented Option Pricers**
 
 ### **1. Parametric Risk-Neutral Density Estimation**  
