@@ -15,6 +15,10 @@ Pyderivatives is an easy-to-use toolbox for option pricing, with a strong emphas
 <img width="720" alt="Kernel Ridge Regression" src="Images/kernel_2021-06-12.png" />
 
 ---
+## **Physical vs Risk Neutral Density vs Pricing Kernel**
+<img width="720" alt="Kernel Ridge Regression" src="Images/Images/panel_2021-06-10.png" />
+
+---
 ## **Full Call Surface Estimation**
 <img width="720" alt="Kernel Ridge Regression" src="Images/Chevron_surface_comparison.png" />
 
