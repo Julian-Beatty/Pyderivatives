@@ -8,17 +8,24 @@ Pyderivatives is an easy-to-use toolbox for option pricing, with a strong emphas
 
 ---
 ## **Physical (True) Density Surface Estimation**
-<img width="720" alt="Kernel Ridge Regression" src="Images/RND_Multi_curve.png" />
+<img width="720" alt="Kernel Ridge Regression" src="Images/p_2021-06-12.png" />
 ---
 ## **Pricing Kernel Surface Surface Estimation**
-<img width="720" alt="Kernel Ridge Regression" src="Images/RND_Multi_curve.png" />
+<img width="720" alt="Kernel Ridge Regression" src="Images/kernel_2021-06-12.png" />
 
 ---
 ## **Full Call Surface Estimation**
 <img width="720" alt="Kernel Ridge Regression" src="Images/Chevron_surface_comparison.png" />
 
 ---
-## **Implemented Option Pricers**
+## **Implemented Parametric models Pricers**
+
+### **1. Stochastic Volatility with Double Exponential Jumps (Heston-Kou)**  
+**Source:** *Journal of Computational and Applied Mathematics, 2025.GAETANO AGAZZOTTI et al*  
+- **(a)** Stochastic Volatility with Double Exponential Jumps  
+- **(b)** Complemented by implementations of Heston, Kou, and Bates models  
+
+## **Implemented Option Semi-parametric/parametric Pricers**
 
 ### **1. Parametric Risk-Neutral Density Estimation**  
 **Source:** *Journal of Econometrics, Yifan Li (2024)*  
