@@ -18,12 +18,18 @@ Pyderivatives is an easy-to-use toolbox for option pricing, with a strong emphas
 <img width="720" alt="Kernel Ridge Regression" src="Images/Chevron_surface_comparison.png" />
 
 ---
+## **Implemented Pricing Kernels**
+
+### **1. Conditional risk and the pricing kernel**  
+**Source:** *Journal of Financial Economics, 2025.David Schreindorfer et al*  
+- **(a)** Flexible parametric pricing kernel  
+ 
 ## **Implemented Parametric models Pricers**
 
-### **1. Stochastic Volatility with Double Exponential Jumps (Heston-Kou)**  
+### **1. CALIBRATION AND OPTION PRICING WITH STOCHASTIC VOLATILITY AND DOUBLE EXPONENTIAL JUMPS**  
 **Source:** *Journal of Computational and Applied Mathematics, 2025.GAETANO AGAZZOTTI et al*  
-- **(a)** Stochastic Volatility with Double Exponential Jumps  
-- **(b)** Complemented by implementations of Heston, Kou, and Bates models  
+- **(a)** Stochastic Volatility with Double Exponential Jumps  (Heston-Kou)
+- **(b)** Complemented by implementations of Heston, Kou, and Bates models
 
 ## **Implemented Option Semi-parametric/parametric Pricers**
 
