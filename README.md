@@ -101,8 +101,4 @@ Pyderivatives is an easy-to-use toolbox for option pricing, with a strong emphas
 ---
 
 
-# Sample Plots
 
-## Evolutionary Mixtures vs Natural Cubic Splines
-Evolutionary Mixtures are compared to natural cubic splines
-<img width="720" alt="Kernel Ridge Regression" src="Images/Splines_Evolutions.png" />
