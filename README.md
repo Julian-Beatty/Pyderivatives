@@ -33,7 +33,7 @@ from pyderivatives import*
 <img width="720" alt="Kernel Ridge Regression" src="images/RRA_surface_2021-01-04.png" />
 
 ---
-## **Full Call Surface Estimation**
+## **Full IV Surface Estimation**
 <img width="720" alt="Kernel Ridge Regression" src="images/IVsurf_Btc2019_04_04.png" />
 
 ---
@@ -47,12 +47,22 @@ from pyderivatives import*
 **Source:** *Journal of Financial Economics, 2025.David Schreindorfer et al*  
 - **(a)** Flexible parametric pricing kernel  
  
-## **Implemented Parametric models Pricers**
+## **Implemented Parametric Model Pricers**
 
-### **1. CALIBRATION AND OPTION PRICING WITH STOCHASTIC VOLATILITY AND DOUBLE EXPONENTIAL JUMPS**  
-**Source:** *Journal of Computational and Applied Mathematics, 2025.GAETANO AGAZZOTTI et al*  
-- **(a)** Stochastic Volatility with Double Exponential Jumps  (Heston-Kou)
-- **(b)** Complemented by implementations of Heston, Kou, and Bates models
+### **1. Calibration and Option Pricing with Stochastic Volatility and Double-Exponential Jumps**  
+**Source:** *Journal of Computational and Applied Mathematics (2025), Gaetano Agazzotti et al.*
+
+The package includes implementations of the following parametric option pricing models:
+
+- **(a)** Stochastic Volatility with Double-Exponential Jumps (**Heston–Kou**)
+- **(b)** Standard benchmark models:
+  - **Heston**
+  - **Kou**
+  - **Bates**
+- **(c)** Multi-factor extensions:
+  - **Double Heston**
+  - **Double Heston–Kou**
+
 
 ## **Implemented Option Semi-parametric/parametric Pricers**
 
