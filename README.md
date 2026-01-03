@@ -24,6 +24,10 @@ Pyderivatives is an easy-to-use toolbox for option pricing, with a strong emphas
 
 ---
 ## **Full Call Surface Estimation**
+<img width="720" alt="Kernel Ridge Regression" src="images/IVsurf_Btc2019_04_04.png" />
+
+---
+## **Full Call Surface Estimation**
 <img width="720" alt="Kernel Ridge Regression" src="images/Call_surface_2021_01_04.png" />
 
 ---
