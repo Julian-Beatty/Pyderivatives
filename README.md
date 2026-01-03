@@ -1,7 +1,9 @@
 # **Option Toolbox for Python**
 
 ## **Overview**
-Pyderivatives is an easy-to-use toolbox for option pricing, with a strong emphasis towards implementation of state-of-the-art models from leading journals in finance, applied mathematics and econometrics. 
+Pyderivatives is an easy-to-use toolbox for option pricing, with a strong emphasis towards implementation of state-of-the-art models from leading journals in finance, applied mathematics and econometrics. Installation is simple:
+pip install git+https://github.com/Julian-Beatty/Pyderivatives.git
+from pyderivatives import*
 
 ## **Risk Neutral Density Surface Estimation**
 <img width="720" alt="Kernel Ridge Regression" src="images/RND_Surface_2021_01_04.png" />
