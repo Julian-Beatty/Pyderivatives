@@ -4,27 +4,27 @@
 Pyderivatives is an easy-to-use toolbox for option pricing, with a strong emphasis towards implementation of state-of-the-art models from leading journals in finance, applied mathematics and econometrics. 
 
 ## **Risk Neutral Density Surface Estimation**
-<img width="720" alt="Kernel Ridge Regression" src="Images/RND_Surface_2021_01_04.png" />
+<img width="720" alt="Kernel Ridge Regression" src="images/RND_Surface_2021_01_04.png" />
 
 ---
 ## **Physical (True) Density Surface Estimation**
-<img width="720" alt="Kernel Ridge Regression" src="Images/Physical_surface_2021_01_04.png" />
+<img width="720" alt="Kernel Ridge Regression" src="images/Physical_surface_2021_01_04.png" />
 
 ---
 ## **Pricing Kernel Surface Estimation**
-<img width="720" alt="Kernel Ridge Regression" src="Images/Pricing_kernel_surface_2021_01_05.png" />
+<img width="720" alt="Kernel Ridge Regression" src="images/Pricing_kernel_surface_2021_01_05.png" />
 
 ---
 ## **Physical vs Risk Neutral Density vs Pricing Kernel**
-<img width="720" alt="Kernel Ridge Regression" src="Images/Physical_pannels_2021_01_04.png" />
+<img width="720" alt="Kernel Ridge Regression" src="images/Physical_pannels_2021_01_04.png" />
 
 ---
 ## **Relative Risk Aversion Surface**
-<img width="720" alt="Kernel Ridge Regression" src="Images/RRA_surface_2021-01-04.png" />
+<img width="720" alt="Kernel Ridge Regression" src="images/RRA_surface_2021-01-04.png" />
 
 ---
 ## **Full Call Surface Estimation**
-<img width="720" alt="Kernel Ridge Regression" src="Images/Call_surface_2021_01_04.png" />
+<img width="720" alt="Kernel Ridge Regression" src="images/Call_surface_2021_01_04.png" />
 
 ---
 ## **Implemented Pricing Kernels/Physical Density Estimation**
