@@ -10,6 +10,7 @@ Installation is simple:
 
 ```bash
 pip install git+https://github.com/Julian-Beatty/Pyderivatives.git
+from pyderivatives import*
 ```
 
 ## **Risk Neutral Density Surface Estimation**
