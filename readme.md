@@ -14,23 +14,23 @@ from pyderivatives import*
 ```
 
 ## **Risk Neutral Density Surface Estimation**
-<img width="720" alt="Kernel Ridge Regression" src="images/RND_Surface_2021_01_04.png" />
+<img width="720" alt="Kernel Ridge Regression" src="images/RND_Surface_2021_01_04 (1).png" />
 
 ---
 ## **Physical (True) Density Surface Estimation**
-<img width="720" alt="Kernel Ridge Regression" src="images/Physical_surface_2021_01_04.png" />
+<img width="720" alt="Kernel Ridge Regression" src="images/Physical_surface_2021_01_04 (2).png" />
 
 ---
 ## **Pricing Kernel Surface Estimation**
-<img width="720" alt="Kernel Ridge Regression" src="images/Pricing_kernel_surface_2021_01_05.png" />
+<img width="720" alt="Kernel Ridge Regression" src="images/Pricing_kernel_surface_2021_01_05 (2).png" />
 
 ---
 ## **Physical vs Risk Neutral Density vs Pricing Kernel**
-<img width="720" alt="Kernel Ridge Regression" src="images/Physical_pannels_2021_01_04.png" />
+<img width="720" alt="Kernel Ridge Regression" src="images/Physical_pannels_2021_01_04 (2).png" />
 
 ---
 ## **Relative Risk Aversion Surface**
-<img width="720" alt="Kernel Ridge Regression" src="images/RRA_surface_2021-01-04.png" />
+<img width="720" alt="Kernel Ridge Regression" src="images/RRA_surface_2021-01-04 (2).png" />
 
 ---
 ## **Full IV Surface Estimation**
@@ -38,7 +38,7 @@ from pyderivatives import*
 
 ---
 ## **Full Call Surface Estimation**
-<img width="720" alt="Kernel Ridge Regression" src="images/Call_surface_2021_01_04.png" />
+<img width="720" alt="Kernel Ridge Regression" src="images/Call_surface_2021_01_04 (1).png" />
 
 ---
 ## **Implemented Pricing Kernels/Physical Density Estimation**
