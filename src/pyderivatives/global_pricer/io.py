@@ -76,3 +76,9 @@ def make_day_from_df(
         call_flag=call_flag,
     )
     return CallSurfaceDay(S0=S0, r=r, q=q, K_obs=K, T_obs=T, C_obs=C)
+
+
+
+
+
+

@@ -57,6 +57,11 @@ from .global_pricer.io import make_day_from_df
 # -------------------------
 from . import arbitrage_repair
 from .arbitrage_repair import RepairConfig, CallSurfaceArbRepair, repair_arb
+###Post estimation
+from . import post_estimation
+from .post_estimation.post_estimation_functions import *
+
+
 
 # (optional) also export plotters at the top-level convenience API
 from .arbitrage_repair import plot_surface, plot_panels, plot_perturb, plot_term, plot_heatmap

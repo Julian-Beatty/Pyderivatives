@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Callable
+from typing import Tuple, Optional
 
 from scipy.optimize import minimize
 
@@ -82,7 +83,7 @@ def _log_phys_density_at_R(
 
     fP_grid = w / mass
 
-    r_real = np.log(float(R_real))
+    r_real = float(R_real)
     fP_at = np.interp(r_real, r_grid, fP_grid, left=0.0, right=0.0)
     if not np.isfinite(fP_at) or fP_at <= 0:
         return -np.inf
@@ -109,20 +110,93 @@ def _fit_theta_for_one_maturity(
 
     def nll(x):
         ll = 0.0
-        for ob in obs_list:
+        theta = np.asarray(x, float)
+
+        for t, ob in enumerate(obs_list):
+            #t = 0
+            ob = obs_list[t]
+            
+            K = np.asarray(ob["K_grid"], float).ravel()
+            qK = np.asarray(ob["qK_row"], float).ravel()
+            
+            # print("K sorted strictly increasing?", bool(np.all(np.diff(K) > 0)))
+            # print("K sorted nondecreasing?", bool(np.all(np.diff(K) >= 0)))
+            # print("min diff(K):", float(np.min(np.diff(np.sort(K)))))
+            # print("any duplicates?", bool(np.any(np.diff(np.sort(K)) == 0)))
+            
+            # print("qK min:", float(np.nanmin(qK)))
+            # print("qK has negatives?", bool(np.any(qK < 0)))
+            # print("this Ran")
             ll_i = _log_phys_density_at_R(
                 R_real=ob["R_real"],
                 K_grid=ob["K_grid"],
                 qK_row=ob["qK_row"],
                 S0=ob["S0"],
                 sigma=ob["sigma"],
-                theta=np.asarray(x, float),
+                theta=theta,
                 theta_spec=theta_spec,
                 r_grid=r_grid,
             )
             if not np.isfinite(ll_i):
-                return 1e50
+                R_real = float(ob["R_real"])
+                gross = float(np.exp(R_real))
+            
+                raise RuntimeError(
+                    "\n[PK DIAGNOSTIC FAILURE]\n"
+                    f"  obs index t = {t}\n"
+                    f"  anchor_key = {ob.get('anchor_key')}\n"
+                    f"  d0 = {ob.get('anchor_date')}\n"
+                    f"  end_target = {ob.get('end_date_target')}\n"
+                    f"  end_matched = {ob.get('end_date_matched')}\n"
+                    f"  horizon_days = {ob.get('horizon_days')}\n"
+                    f"  actual_days = {(pd.Timestamp(ob.get('end_date_matched')) - pd.Timestamp(ob.get('anchor_date'))).days if ob.get('end_date_matched') is not None else 'NA'}\n"
+                    f"  R_real (log) = {R_real}\n"
+                    f"  gross = {gross}\n"
+                    f"  S0_ret(adj) = {ob.get('S0_ret')}\n"
+                    f"  S1_ret(adj) = {ob.get('S1_ret')}\n"
+                    f"  px0(raw) = {ob.get('px0')}  aj0 = {ob.get('aj0')}\n"
+                    f"  px1(raw) = {ob.get('px1')}  aj1 = {ob.get('aj1')}\n"
+                    f"  option S0 (dd['S0']) = {ob.get('S0')}\n"
+                    f"  r_grid = [{r_grid[0]}, {r_grid[-1]}]\n"
+                )
+            # if not np.isfinite(ll_i):
+            #     R_real = float(ob["R_real"])
+            #     Kg = np.asarray(ob["K_grid"], float)
+            #     S0 = float(ob["S0"])
+            
+            #     gross = np.exp(R_real)
+            
+            #     raise RuntimeError(
+            #         "\n[PK DIAGNOSTIC FAILURE]\n"
+            #         f"  obs index t = {t}\n"
+            #         f"  R_real (log-return) = {R_real}\n"
+            #         f"  exp(R_real) (gross return) = {gross}\n"
+            #         f"  r_grid = [{r_grid[0]}, {r_grid[-1]}]\n"
+            #         f"  R_real in grid? {r_grid[0] <= R_real <= r_grid[-1]}\n"
+            #         f"  S0 = {S0}\n"
+            #         f"  implied S_end = {S0 * gross}\n"
+            #         f"  K_grid = [{Kg.min()}, {Kg.max()}]  (n={Kg.size})\n"
+            #         f"  implied strike = {S0 * gross}\n"
+            #         f"  qK_row finite? {np.all(np.isfinite(ob['qK_row']))}\n"
+            #     )
+            # if not np.isfinite(ll_i):
+            #     R_real = float(ob["R_real"])
+            #     Kg = np.asarray(ob["K_grid"], float)
+            #     S0 = float(ob["S0"])
+
+            #     # Helpful: realized return relative to evaluation grid + strike span
+            #     raise RuntimeError(
+            #         "Non-finite log-likelihood.\n"
+            #         f"  obs index t={t}\n"
+            #         f"  R_real={R_real}\n"
+            #         f"  r_grid=[{float(r_grid[0])}, {float(r_grid[-1])}]\n"
+            #         f"  S0={S0}\n"
+            #         f"  K_grid=[{float(np.nanmin(Kg))}, {float(np.nanmax(Kg))}] (n={Kg.size})\n"
+            #         f"  qK_row finite? {bool(np.all(np.isfinite(ob['qK_row'])))}\n"
+            #     )
+
             ll += ll_i
+
         return -ll
 
     res = minimize(
@@ -167,6 +241,9 @@ def estimate_pricing_kernel_global(
     maxiter: int = 400,
     min_obs_per_T: int = 30,
     on_theta_fit: Optional[Callable[[int, float, ThetaFit], None]] = None,
+    diag_build_obs: bool = False,
+    rnd_tail_alpha: Optional[Tuple[float, float]] = None,
+
 ) -> Dict[str, Any]:
     """
     GLOBAL only:
@@ -181,9 +258,18 @@ def estimate_pricing_kernel_global(
         hit = load(cache.folder, key)
         if hit is not None:
             return hit
+    drop_log = {"counts": {}, "examples": {}} if diag_build_obs else None
 
     # Build per-maturity observation lists
     T_grid, obs_by_T = build_obs_by_maturity(result_dict, stock_df, spot_col=spot_col)
+    
+    T_grid, obs_by_T = build_obs_by_maturity(
+    result_dict,
+    stock_df,
+    spot_col=spot_col,
+    drop_log=drop_log,
+    rnd_tail_alpha=rnd_tail_alpha,
+)
 
     nT = len(obs_by_T)
     p = int(theta_spec.N) * (int(theta_spec.Ksig) + 1)
@@ -312,6 +398,8 @@ def estimate_pricing_kernel_global(
     out = {
         "eval_spec": {"r_bounds": tuple(eval_spec.r_bounds), "r_grid_size": int(eval_spec.r_grid_size)},
         "theta_boot_draws_by_T": theta_boot_draws_by_T,
+        "obs_drop_log": drop_log,
+
 
         "model": "projected_pricing_kernel_global",
         "dataset_tag": dataset_tag,
