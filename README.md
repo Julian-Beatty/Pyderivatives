@@ -7,39 +7,6 @@ Pyderivatives is an easy to use toolbox focused on option pricng and econometric
 ![SLV IV and RND surfaces](pyderivatives/Images/SLV_IV_RND_1x2_2024-08-01.png)
 
 
-## Call Surface, Implied Volatility Surface, and Risk-Neutral Density Estimation
-- **Two-factor stochastic volatility with double-exponential jumps (Double Heston–Kou)**  
-  Guohe, D. (2020). *Option pricing under two-factor stochastic volatility jump-diffusion model*.  
-  *Complexity*, Hindawi.
-
-- **Two-factor stochastic volatility model (Double Heston)**  
-  Christoffersen, P., Heston, S., & Jacobs, K. (2009).  
-  *The shape and term structure of the index option smirk: Why multifactor stochastic volatility models work so well*.  
-  *Management Science*, 55(12), 1914–1932.
-
-- **Stochastic volatility with double-exponential jumps (Heston–Kou)**  
-  Ahlip, R., & Rutkowski, M. (2015).  
-  *Semi-analytical pricing of currency options in the Heston/CIR jump-diffusion hybrid model*.  
-  *Applied Mathematical Finance*, 22(1), 1–27.
-
-- **Jump-diffusion with double-exponential jumps (Kou model)**  
-  Kou, S. G. (2002). *A jump-diffusion model for option pricing*.  
-  *Management Science*, 48(8), 1086–1101.
-
-- **Stochastic volatility with lognormal jumps (Bates model)**  
-  Bates, D. S. (1996). *Jumps and stochastic volatility: Exchange rate processes implicit in Deutsche Mark options*.  
-  *Review of Financial Studies*, 9(1), 69–107.
-
-- **Stochastic volatility model (Heston)**  
-  Heston, S. L. (1993). *A closed-form solution for options with stochastic volatility, with applications to bond and currency options*.  
-  *Review of Financial Studies*, 6(2), 327–343.
-
-- **Black–Scholes model**
-![GLD](pyderivatives/Images/GLD_CallPanels_2022_08_08.png)
-![btc](pyderivatives/Images/btc_RNDPanels_2021_08_21.png)
-
----
-
 ## Pricing Kernel and Physical Density Estimation
 
 
@@ -90,6 +57,39 @@ The package provides functionality for enforcing static no-arbitrage conditions 
   *Untangling market links: A QVAR–TVP VAR analysis of precious metals and oil amid the pandemic*.  
   *Journal of Futures Markets*, 46(1), 101–120.
 ![Waveletse](pyderivatives/Images/Connectedness_prem_vol_ann_H60.png)
+
+## Call Surface, Implied Volatility Surface, and Risk-Neutral Density Estimation
+- **Two-factor stochastic volatility with double-exponential jumps (Double Heston–Kou)**  
+  Guohe, D. (2020). *Option pricing under two-factor stochastic volatility jump-diffusion model*.  
+  *Complexity*, Hindawi.
+
+- **Two-factor stochastic volatility model (Double Heston)**  
+  Christoffersen, P., Heston, S., & Jacobs, K. (2009).  
+  *The shape and term structure of the index option smirk: Why multifactor stochastic volatility models work so well*.  
+  *Management Science*, 55(12), 1914–1932.
+
+- **Stochastic volatility with double-exponential jumps (Heston–Kou)**  
+  Ahlip, R., & Rutkowski, M. (2015).  
+  *Semi-analytical pricing of currency options in the Heston/CIR jump-diffusion hybrid model*.  
+  *Applied Mathematical Finance*, 22(1), 1–27.
+
+- **Jump-diffusion with double-exponential jumps (Kou model)**  
+  Kou, S. G. (2002). *A jump-diffusion model for option pricing*.  
+  *Management Science*, 48(8), 1086–1101.
+
+- **Stochastic volatility with lognormal jumps (Bates model)**  
+  Bates, D. S. (1996). *Jumps and stochastic volatility: Exchange rate processes implicit in Deutsche Mark options*.  
+  *Review of Financial Studies*, 9(1), 69–107.
+
+- **Stochastic volatility model (Heston)**  
+  Heston, S. L. (1993). *A closed-form solution for options with stochastic volatility, with applications to bond and currency options*.  
+  *Review of Financial Studies*, 6(2), 327–343.
+
+- **Black–Scholes model**
+![GLD](pyderivatives/Images/GLD_CallPanels_2022_08_08.png)
+![btc](pyderivatives/Images/btc_RNDPanels_2021_08_21.png)
+
+---
 
 
 
