@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyderivatives"
+version = "0.1.0"
+description = "Option/pricing-kernel utilities and derivatives research toolkit"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{ name = "Julian Beatty" }]
+dependencies = [
+  "numpy",
+  "pandas",
+  "scipy",
+  "matplotlib",
+  "cvxpy",
+  "networkx",
+  "pycwt",
+  "statsmodels"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pyderivatives*"]

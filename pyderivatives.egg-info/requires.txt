@@ -1,0 +1,8 @@
+numpy
+pandas
+scipy
+matplotlib
+cvxpy
+networkx
+pycwt
+statsmodels

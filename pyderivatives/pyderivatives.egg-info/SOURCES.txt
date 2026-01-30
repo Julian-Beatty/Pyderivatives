@@ -1,0 +1,6 @@
+pyproject.toml
+pyderivatives.egg-info/PKG-INFO
+pyderivatives.egg-info/SOURCES.txt
+pyderivatives.egg-info/dependency_links.txt
+pyderivatives.egg-info/requires.txt
+pyderivatives.egg-info/top_level.txt
