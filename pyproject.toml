@@ -16,21 +16,11 @@ dependencies = [
   "scipy",
   "matplotlib",
   "cvxpy",
-<<<<<<< HEAD
   "networkx",
   "pycwt",
-  "statsmodels"
+  "statsmodels",
 ]
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["pyderivatives*"]
-=======
-]
-
-[tool.setuptools]
-package-dir = {"" = "src"}
-
-[tool.setuptools.packages.find]
-where = ["src"]
->>>>>>> a1fb8cdc95bd55ce8c038a4c6b2eb4a4de866e0c
