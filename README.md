@@ -17,10 +17,9 @@ PyDerivatives includes tools for estimating **physical densities** and **pricing
   *Conditional risk and the pricing kernel*.  
   *Journal of Financial Economics*, 171, 104106.
 ![BTC Pricing kernel Surface](pyderivatives/Images/BTCpkernel.png)
-![BTC Pricing kernel Surface](pyderivatives/Images/pricing_kernel_BTC_2x2.png)
 ![BTC Pricing kernel Surface](pyderivatives/Images/btc_physical_surface.png)
-![BTC Pricing kernel Overlay](pyderivatives/Images/BTC_overlaidpkern_2021-06-25.png)
 ![BTC Pricing kernel Surface](pyderivatives/Images/Risk_Aversion_surface.png)
+![BTC Pricing kernel Overlay](pyderivatives/Images/BTC_overlaidpkern_2021-06-25.png)
 
 
 ---
@@ -39,11 +38,19 @@ The package provides functionality for enforcing static no-arbitrage conditions 
 ## Econometric Toolbox
 
 ### Wavelet Analysis
-![Wavelets Analysis](pyderivatives/Images/waveletpannel.png)
 
 - Crowley, P. M. (2007).  
   *A guide to wavelets for economists*.  
   *Journal of Economic Surveys*, 21(2), 207–267.
+  ![Wavelets Analysis](pyderivatives/Images/waveletpannel.png)
+
+
+  ### Quantile Time-Varying VAR (QTVP-VAR)
+
+- Raza, S. A., Ahmed, M., & Ali, S. (2026).  
+  *Untangling market links: A QVAR–TVP VAR analysis of precious metals and oil amid the pandemic*.  
+  *Journal of Futures Markets*, 46(1), 101–120.
+![Waveletse](pyderivatives/Images/Connectedness_prem_vol_ann_H60.png)
 
 ### Quantile Regression Analysis
 
@@ -51,12 +58,7 @@ The package provides functionality for enforcing static no-arbitrage conditions 
   *Asymmetries of the intraday return–volatility relation*.  
   *International Review of Financial Analysis*, 48, 182–192.
 
-### Quantile Time-Varying VAR (QTVP-VAR)
 
-- Raza, S. A., Ahmed, M., & Ali, S. (2026).  
-  *Untangling market links: A QVAR–TVP VAR analysis of precious metals and oil amid the pandemic*.  
-  *Journal of Futures Markets*, 46(1), 101–120.
-![Waveletse](pyderivatives/Images/Connectedness_prem_vol_ann_H60.png)
 
 ## Call Surface, Implied Volatility Surface, and Risk-Neutral Density Estimation
 - **Two-factor stochastic volatility with double-exponential jumps (Double Heston–Kou)**  
@@ -90,6 +92,7 @@ The package provides functionality for enforcing static no-arbitrage conditions 
 ![btc](pyderivatives/Images/btc_RNDPanels_2021_08_21.png)
 
 ---
+
 
 
 
