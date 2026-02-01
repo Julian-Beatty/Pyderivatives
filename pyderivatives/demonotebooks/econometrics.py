@@ -7,6 +7,19 @@ with open("moments_returns.pkl", "rb") as f:
 moments_premia_dict=obj["moments_by_asset"]["BTC"]
 logreturns=obj["btc_logreturns"]
 
+import pickle
+from importlib.resources import files
+
+def load_moments_by_asset():
+    """
+    Load the packaged demo pickle: moments_by_asset.pkl
+    """
+    p = files("pyderivatives.demodata") / "moments_by_asset.pkl"
+    with p.open("rb") as f:
+        return pickle.load(f)
+
+mom = load_moments_by_asset()
+
 assymetric_moments_dict={}
 
 investment_horizon=[7,14,21,28,35,60]

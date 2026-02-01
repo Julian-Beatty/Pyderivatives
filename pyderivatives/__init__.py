@@ -1,6 +1,8 @@
 # pyderivatives/__init__.py
 # Top-level convenience API for your project.
 # Keep imports explicit to avoid circular-import hell.
+# Demo data
+from . import demodata
 
 # -------------------------
 # yieldcurve (your current exports)
