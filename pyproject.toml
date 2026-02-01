@@ -6,9 +6,9 @@ build-backend = "setuptools.build_meta"
 name = "pyderivatives"
 version = "0.1.0"
 description = "Option/pricing-kernel utilities and derivatives research toolkit"
-readme = "README.md"
+readme = { text = "PyDerivatives", content-type = "text/plain" }
 requires-python = ">=3.10"
-license = {text = "MIT"}
+license = { text = "MIT" }
 authors = [{ name = "Julian Beatty" }]
 dependencies = [
   "numpy",
@@ -21,6 +21,15 @@ dependencies = [
   "statsmodels",
 ]
 
+# ----------------------------------
+# FIND ALL PACKAGES (incl. demodata)
+# ----------------------------------
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["pyderivatives*"]
+
+# ----------------------------------
+# INCLUDE PICKLED DEMO DATA
+# ----------------------------------
+[tool.setuptools.package-data]
+pyderivatives = ["demodata/*.pkl"]
