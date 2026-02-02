@@ -1,6 +1,34 @@
-## Pyderivatives 5.0
+# PyDerivatives 5.0  
+### A Modern Toolkit for Option Pricing, Densities, and Econometric Analysis
 
-Pyderivatives is an easy to use toolbox focused on option pricng and econometrics. This package focuses especially on implementing state of the art methodologies from academic journals, and generalizing them so that they can be readily used by researchers, industry and data scientists. PyDerivatives supports full estimation and calibration of **call price surfaces**, **implied volatility (IV) surfaces**, **risk-neutral density (RND) surfaces**,**Pricing kernel Surfacess**, and **physical-density (PD) surfaces**  using a broad class of advanced option pricing models. Can be easily installed with: pip install pyderivatives
+**PyDerivatives** is an easy-to-use Python toolbox for **option pricing** and **financial econometrics**, with a particular emphasis on implementing **state-of-the-art methodologies from the academic literature** and making them readily accessible to researchers, practitioners, and data scientists.
+
+The package is designed to provide a unified and extensible framework for estimating, analyzing, and visualizing option-implied objects across multiple asset classes.
+
+---
+
+## Core Capabilities
+
+PyDerivatives supports full estimation and calibration of:
+
+- **Call price surfaces**
+- **Implied volatility (IV) surfaces**
+- **Risk-neutral density (RND) surfaces**
+- **Pricing kernel surfaces**
+- **Physical density (PD) surfaces**
+
+These objects can be constructed using a broad class of advanced option pricing models and nonparametric techniques, with a strong focus on robustness, flexibility, and empirical relevance.
+
+---
+
+## Installation
+
+PyDerivatives can be installed directly from PyPI:
+
+```bash
+pip install pyderivatives
+from pyderivatives import*
+```
 
 
 ![BTC IV and RND surfaces](pyderivatives/Images/BTC_IV_RND_1x2_2024-08-01.png)
@@ -92,6 +120,7 @@ The package provides functionality for enforcing static no-arbitrage conditions 
 ![btc](pyderivatives/Images/btc_RNDPanels_2021_08_21.png)
 
 ---
+
 
 
 
