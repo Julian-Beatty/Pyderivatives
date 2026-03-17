@@ -32,4 +32,4 @@ include = ["pyderivatives*"]
 # INCLUDE PICKLED DEMO DATA
 # ----------------------------------
 [tool.setuptools.package-data]
-pyderivatives = ["demodata/*.pkl"]
+pyderivatives = ["demodata/*.csv", "demodata/*.pkl"]
