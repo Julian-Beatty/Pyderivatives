@@ -28,8 +28,8 @@ dependencies = [
 where = ["."]
 include = ["pyderivatives*"]
 
-# ----------------------------------
-# INCLUDE PICKLED DEMO DATA
-# ----------------------------------
+[tool.setuptools]
+include-package-data = true
+
 [tool.setuptools.package-data]
 pyderivatives = ["demodata/*.csv", "demodata/*.pkl"]
