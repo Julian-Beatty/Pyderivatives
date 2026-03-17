@@ -352,6 +352,16 @@ import numpy as np
 import matplotlib.pyplot as plt
 from typing import Optional, Union
 from pathlib import Path
+import numpy as np
+import matplotlib.pyplot as plt
+from pathlib import Path
+from typing import Optional, Union
+
+import numpy as np
+import matplotlib.pyplot as plt
+from pathlib import Path
+from typing import Optional, Union
+
 def rnd_panels(
     res: dict,
     *,
@@ -369,31 +379,69 @@ def rnd_panels(
     dpi: int = 200,
     legend_loc: str = "upper right",
     figsize_per_panel: float = 2.2,
-    # ---- NEW: x-axis / bounds ----
-    x_axis: str = "K",                            # {"K","R","r"}  strike / gross return / log return
+    # ---- x-axis / bounds ----
+    x_axis: str = "K",                            # {"K","R","r"}
     x_bounds: tuple[float, float] | None = None,  # bounds in chosen x_axis units
+    # ---- percentile markers ----
+    pct_lower: Optional[float] = None,            # e.g. 1 or 0.01
+    pct_upper: Optional[float] = None,            # e.g. 99 or 0.99
+    mark_percentiles: bool = True,
+    pct_line_style: str = ":",
+    pct_line_width: float = 2.0,
+    pct_lower_label: Optional[str] = None,        # override legend label if desired
+    pct_upper_label: Optional[str] = None,        # override legend label if desired
 ):
     """
-    Plot RND panels with optional x-axis transform:
+    Plot RND panels with optional x-axis transform and optional percentile markers.
 
     x_axis="K": x = K (strike)
     x_axis="R": x = R = K / S0 (gross return / moneyness)
     x_axis="r": x = r = log(K / S0) (log return)
 
-    Notes:
-    - When using x_axis in {"R","r"}, spot (S0) must be available.
-    - This function plots the same y-values (q on K-grid). It does not apply Jacobian
-      to convert to a density in R or r. If you want a true density on R or r, say so
-      and I’ll add the Jacobian option.
+    Percentiles:
+    - Computed from q(K|T) on the (masked) K-grid window via numerical CDF inversion.
+    - Legend labels include the percentile AND the corresponding strike, e.g. "p99-K6000".
     """
+
+    def _to_prob(p: Optional[float]) -> Optional[float]:
+        if p is None:
+            return None
+        p = float(p)
+        if p > 1.0:
+            p = p / 100.0
+        if not (0.0 < p < 1.0):
+            raise ValueError("Percentiles must be in (0,1) or (0,100).")
+        return p
+
+    def _quantile_from_pdf(K: np.ndarray, pdf: np.ndarray, qprob: float) -> float:
+        pdf = np.clip(np.asarray(pdf, float), 0.0, np.inf)
+        area = np.trapezoid(pdf, K)  # NumPy 2.x safe
+        if not np.isfinite(area) or area <= 0:
+            return np.nan
+        pdf = pdf / area
+        cdf = np.concatenate([
+            [0.0],
+            np.cumsum((pdf[1:] + pdf[:-1]) * 0.5 * np.diff(K))
+        ])
+        cdf = np.clip(cdf, 0.0, 1.0)
+        return float(np.interp(qprob, cdf, K))
+
+    def _fmtK(Kq: float) -> str:
+        # strike formatting for legend labels
+        if not np.isfinite(Kq):
+            return "nan"
+        if abs(Kq) >= 100:
+            return f"{Kq:.0f}"
+        return f"{Kq:.4g}"
+
     if "rnd_surface" not in res:
         raise KeyError("Missing RND. Expected res['rnd_surface'].")
 
-    q = np.asarray(res["rnd_surface"], float)
+    qsurf = np.asarray(res["rnd_surface"], float)
     K_grid = np.asarray(res["K_grid"], float).ravel()
     T_grid = np.asarray(res["T_grid"], float).ravel()
 
-    if q.shape != (T_grid.size, K_grid.size):
+    if qsurf.shape != (T_grid.size, K_grid.size):
         raise ValueError("RND surface must have shape (len(T_grid), len(K_grid)).")
     if K_grid.size < 3:
         raise ValueError("K_grid too small to plot meaningfully.")
@@ -411,9 +459,13 @@ def rnd_panels(
     x_axis = str(x_axis).strip()
     if x_axis not in {"K", "R", "r"}:
         raise ValueError("x_axis must be one of {'K','R','r'}.")
-
     if x_axis in {"R", "r"} and spot is None:
         raise ValueError("spot/S0 is required when x_axis is 'R' or 'r'.")
+
+    # ----- percentiles requested? -----
+    qL = _to_prob(pct_lower)
+    qU = _to_prob(pct_upper)
+    want_pct = bool(mark_percentiles) and ((qL is not None) or (qU is not None))
 
     # ----- choose maturities -----
     n_pan = int(min(max(n_panels, 1), T_grid.size))
@@ -432,9 +484,7 @@ def rnd_panels(
         Kmin0, Kmax0 = float(K_grid.min()), float(K_grid.max())
 
     # ----- map bounds in chosen axis back to a K-mask -----
-    # We always mask on K_grid indices, then compute x for plotting.
     if x_bounds is None:
-        # use default K-window
         k_mask = (K_grid >= Kmin0) & (K_grid <= Kmax0)
     else:
         lo, hi = float(x_bounds[0]), float(x_bounds[1])
@@ -444,13 +494,10 @@ def rnd_panels(
         if x_axis == "K":
             k_mask = (K_grid >= lo) & (K_grid <= hi)
         elif x_axis == "R":
-            # R = K/spot => K = R*spot
             k_mask = (K_grid >= lo * spot) & (K_grid <= hi * spot)
         else:  # x_axis == "r"
-            # r = log(K/spot) => K = spot*exp(r)
             k_mask = (K_grid >= spot * np.exp(lo)) & (K_grid <= spot * np.exp(hi))
 
-    # fall back if mask is empty
     if not np.any(k_mask):
         raise ValueError("x_bounds produced an empty plotting window on K_grid.")
 
@@ -460,21 +507,21 @@ def rnd_panels(
     if x_axis == "K":
         x_plot = K_plot
         xlabel = "Strike K"
-        x_spot = spot
-        show_spot_line = bool(show_spot) and (spot is not None) and (x_plot.min() <= x_spot <= x_plot.max())
-        spot_line_x = x_spot
+        show_spot_line = bool(show_spot) and (spot is not None)
+        spot_line_x = spot if spot is not None else None
     elif x_axis == "R":
         x_plot = K_plot / spot
         xlabel = "Gross return R = K/S0"
-        show_spot_line = bool(show_spot)  # spot maps to R=1
+        show_spot_line = bool(show_spot)
         spot_line_x = 1.0
-        show_spot_line = show_spot_line and (x_plot.min() <= spot_line_x <= x_plot.max())
     else:  # x_axis == "r"
         x_plot = np.log(K_plot / spot)
         xlabel = "Log return r = log(K/S0)"
-        show_spot_line = bool(show_spot)  # spot maps to r=0
+        show_spot_line = bool(show_spot)
         spot_line_x = 0.0
-        show_spot_line = show_spot_line and (x_plot.min() <= spot_line_x <= x_plot.max())
+
+    if show_spot_line and spot_line_x is not None:
+        show_spot_line = (x_plot.min() <= spot_line_x <= x_plot.max())
 
     # ----- panel shape -----
     if panel_shape is None:
@@ -489,12 +536,42 @@ def rnd_panels(
     fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(fig_w, fig_h), sharex=True)
     axes = np.atleast_1d(axes).ravel()
 
+    # helper: map strike quantile to axis units
+    def _K_to_x(Kq: float) -> float:
+        if x_axis == "K":
+            return Kq
+        if x_axis == "R":
+            return Kq / spot
+        return float(np.log(Kq / spot))
+
     # ----- plot -----
     for ax, j in zip(axes[:n_panels_actual], idxT):
-        ax.plot(x_plot, q[j, k_mask], linewidth=2.2, color="tab:blue", label="RND")
+        ax.plot(x_plot, qsurf[j, k_mask], linewidth=2.2, color="tab:blue", label="RND")
 
         if show_spot_line:
             ax.axvline(spot_line_x, linestyle="--", linewidth=1.5, color="black", label=spot_label)
+
+        # ---- percentile markers ----
+        if want_pct:
+            pdf_row = qsurf[j, k_mask]  # use the plotted window
+
+            if qL is not None:
+                KqL = _quantile_from_pdf(K_plot, pdf_row, qL)
+                if np.isfinite(KqL):
+                    xL = _K_to_x(KqL)
+                    default_lblL = f"p{int(round(qL*100))}-K{_fmtK(KqL)}"
+                    lblL = pct_lower_label or default_lblL
+                    ax.axvline(xL, linestyle=pct_line_style, linewidth=pct_line_width,
+                               color="tab:red", label=lblL)
+
+            if qU is not None:
+                KqU = _quantile_from_pdf(K_plot, pdf_row, qU)
+                if np.isfinite(KqU):
+                    xU = _K_to_x(KqU)
+                    default_lblU = f"p{int(round(qU*100))}-K{_fmtK(KqU)}"
+                    lblU = pct_upper_label or default_lblU
+                    ax.axvline(xU, linestyle=pct_line_style, linewidth=pct_line_width,
+                               color="tab:green", label=lblU)
 
         d = f"{date_str} " if date_str else ""
         ax.set_title(f"{d}(T = {float(T_grid[j]):.5g} yr)")
@@ -502,7 +579,6 @@ def rnd_panels(
         ax.grid(True, alpha=0.25)
         ax.legend(loc=legend_loc)
 
-        # apply x-limits directly in chosen axis units
         ax.set_xlim(float(x_plot.min()), float(x_plot.max()))
 
     # turn off unused axes
@@ -525,6 +601,8 @@ def rnd_panels(
 
     plt.show()
     return fig
+
+
 def cdf_panels(
     res: dict,
     *,

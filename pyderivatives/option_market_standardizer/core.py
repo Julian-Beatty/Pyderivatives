@@ -34,7 +34,7 @@ class OptionMarketStandardizer:
 
     data_directory_path: Optional[Union[str, Path]] = None
     vendor_name: str = "optionmetrics"
-
+    ticker: Optional[str] = None
     # stock config
     stock_date_col: str = "date"
     stock_price_col: str = "close"
@@ -132,6 +132,7 @@ class OptionMarketStandardizer:
         stock = stock[[self.stock_date_col, self.stock_price_col]].rename(
             columns={self.stock_date_col: "date", self.stock_price_col: "stock_price"}
         )
+        # add ticker column if provided
 
         # merge S0
         opt_std = ensure_timestamp(opt_std, ["date", "exdate"])
@@ -171,6 +172,7 @@ class OptionMarketStandardizer:
 
         opt_std = collapse_duplicate_strikes(opt_std)
 
+
         needed = {
             "date", "exdate", "option_right", "strike", "moneyness",
             "best_bid", "best_offer", "mid_price",
@@ -184,7 +186,13 @@ class OptionMarketStandardizer:
             ["date","exdate","rounded_maturity","moneyness","option_right","strike",
              "best_bid","mid_price","best_offer","stock_price","risk_free_rate","volume"]
         ]
-        opt_std = opt_std.sort_values(by=["date", "rounded_maturity", "option_right", "strike"])
+        opt_std = opt_std.sort_values(
+            by=["date", "rounded_maturity", "option_right", "strike"]
+        )
+        
+        # --- add ticker label ---
+        if self.ticker is not None:
+            opt_std["ticker"] = str(self.ticker)
         return opt_std
 
     def keep_options(

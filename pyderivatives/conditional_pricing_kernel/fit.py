@@ -357,46 +357,6 @@ def estimate_pricing_kernel_global(
             print(f"[PK][boot] T={Tj:.4f}y succ={boot_out.get('boot_successes',0)}/{bootstrap.n_boot}")
 
 
-
-    # theta_ci_low = None
-    # theta_ci_high = None
-    # if bootstrap.enabled:
-    #     rng = np.random.default_rng(bootstrap.random_state)
-    #     alpha_lo, alpha_hi = bootstrap.ci_levels
-    #     theta_ci_low = np.full_like(theta_master, np.nan)
-    #     theta_ci_high = np.full_like(theta_master, np.nan)
-
-    #     for j in range(nT):
-    #         obs = obs_by_T[j]
-    #         if len(obs) < int(min_obs_per_T):
-    #             continue
-    #         # bootstrap distribution of theta for slice j
-    #         thetas = []
-    #         n = len(obs)
-    #         for _ in range(int(bootstrap.n_boot)):
-    #             idx = _block_boot_indices(n, bootstrap.block_len, rng)
-    #             obs_b = [obs[i] for i in idx]
-    #             fit_b = _fit_theta_for_one_maturity(
-    #                 obs_b,
-    #                 theta_spec,
-    #                 maxiter=maxiter,
-    #                 r_bounds=eval_spec.r_bounds,
-    #                 r_grid_size=eval_spec.r_grid_size,
-    #             )
-    #             if fit_b.success and np.all(np.isfinite(fit_b.theta_hat)):
-    #                 thetas.append(fit_b.theta_hat)
-
-    #         if len(thetas) >= max(10, int(0.2 * bootstrap.n_boot)):
-    #             A = np.vstack(thetas)
-    #             theta_ci_low[j, :] = np.quantile(A, alpha_lo, axis=0)
-    #             theta_ci_high[j, :] = np.quantile(A, alpha_hi, axis=0)
-
-    # --- Evaluate surfaces on an example anchor date? (we keep evaluation separate) ---
-    # Your plots typically take an "out" per anchor date, so we return:
-    #   - fitted theta surface (theta_master + CI)
-    #   - plus a helper-ready "global_fit" block
-    # You can evaluate any date using eval.evaluate_anchor_surfaces_with_theta_master(...)
-
     out = {
         "eval_spec": {"r_bounds": tuple(eval_spec.r_bounds), "r_grid_size": int(eval_spec.r_grid_size)},
         "theta_boot_draws_by_T": theta_boot_draws_by_T,

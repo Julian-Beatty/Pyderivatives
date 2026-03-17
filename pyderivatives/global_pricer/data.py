@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import numpy as np
 
 
+
 @dataclass(frozen=True)
 class CallSurfaceDay:
     """
@@ -15,6 +16,7 @@ class CallSurfaceDay:
     K_obs: np.ndarray
     T_obs: np.ndarray
     C_obs: np.ndarray
+    ticker: str = "Unknown"   # <-- ADD THIS (default)
 
     def __post_init__(self):
         object.__setattr__(self, "S0", float(self.S0))
@@ -23,6 +25,15 @@ class CallSurfaceDay:
         object.__setattr__(self, "K_obs", np.asarray(self.K_obs, float).ravel())
         object.__setattr__(self, "T_obs", np.asarray(self.T_obs, float).ravel())
         object.__setattr__(self, "C_obs", np.asarray(self.C_obs, float).ravel())
+
+        # --- normalize ticker (since frozen=True) ---
+        t = self.ticker
+        if t is None:
+            t = "Unknown"
+        t = str(t).strip()
+        if t == "" or t.lower() == "nan":
+            t = "Unknown"
+        object.__setattr__(self, "ticker", t)
 
         if not (self.K_obs.size == self.T_obs.size == self.C_obs.size):
             raise ValueError("K_obs, T_obs, C_obs must have same length.")

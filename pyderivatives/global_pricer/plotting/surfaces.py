@@ -396,7 +396,6 @@ def cdf_surface_plot(
 
         return fig
 
-
 def rnd_surface_plot(
     res: dict,
     *,
@@ -406,26 +405,25 @@ def rnd_surface_plot(
     interactive: bool = True,
     show: bool = True,
     dpi: int = 300,
+    # view / style
+    elev: float = 28,
+    azim: float = -60,
+    alpha: float = 0.9,
     # x-axis options
     x_axis: str = "K",                            # {"K","R","r"}
     x_bounds: tuple[float, float] | None = None,  # bounds in chosen x units
     spot: float | None = None,                    # S0; required for {"R","r"} unless in res
-    # ---- NEW (for subplot support) ----
-    ax=None,                                      # matplotlib 3d axis to draw into
-    add_colorbar: bool = True,                    # whether to add a colorbar
+    # subplot support
+    ax=None,
+    add_colorbar: bool = True,
 ):
     """
     Plot RND surface q(K|T).
 
-    x_axis:
-      "K": x = K
-      "R": x = K/S0
-      "r": x = log(K/S0)
-
-    x_bounds applied in chosen x units.
-
-    Requires:
-      res["rnd_surface"], res["K_grid"], res["T_grid"]
+    Returns
+    -------
+    fig, ax, surf     (static Matplotlib case)
+    fig               (interactive Plotly case)
     """
     import numpy as np
     from pathlib import Path
@@ -518,7 +516,7 @@ def rnd_surface_plot(
             if save.suffix.lower() == ".html":
                 fig.write_html(save)
             else:
-                fig.write_image(save)  # needs kaleido
+                fig.write_image(save)
             print(f"[saved] {save}")
 
         if show:
@@ -544,63 +542,37 @@ def rnd_surface_plot(
         cmap=cmap,
         linewidth=0,
         antialiased=True,
-        alpha=0.9,
+        alpha=alpha,
     )
 
-    if add_colorbar:
+    # ---- colorbar only for standalone figure
+    if add_colorbar and created_fig:
         fig.colorbar(surf, ax=ax, shrink=0.6, pad=0.08, label="q(K|T)")
 
     ax.set_title(title)
     ax.set_xlabel(xlabel)
     ax.set_ylabel("Maturity T (years)")
     ax.set_zlabel("q(K|T)")
-    # (optional) add a view_init here if you want parity with IV plots:
-    # ax.view_init(elev=28, azim=-60)
+    ax.view_init(elev=elev, azim=azim)
 
     if created_fig:
         plt.tight_layout()
 
-        if save is not None:
-            save = Path(save)
-            save.parent.mkdir(parents=True, exist_ok=True)
-            fig.savefig(save, dpi=dpi, bbox_inches="tight")
-            print(f"[saved] {save}")
+    if save is not None:
+        save = Path(save)
+        save.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save, dpi=dpi, bbox_inches="tight")
+        print(f"[saved] {save}")
 
-        if show:
-            plt.show()
-        else:
-            plt.close(fig)
+    if show and created_fig:
+        plt.show()
+    elif created_fig and not show:
+        plt.close(fig)
 
     return fig, ax, surf
 
 
 
-def plot_call_surface_fit_with_obs(
-    res: dict,
-    *,
-    day,
-    title: str = "Fitted Call Surface with Observed Quotes",
-    fitted_alpha: float = 0.55,
-    obs_size: float = 18.0,
-    downsample_obs: int | None = None,
-):
-    """
-    Convenience wrapper around plot_fitted_surface_with_observed().
-    Expects `res` to have: K_grid, T_grid, C_fit
-    Expects `day` to have: K_obs, T_obs, C_obs
-    """
-    return plot_fitted_surface_with_observed(
-        K_obs=day.K_obs,
-        T_obs=day.T_obs,
-        C_obs=day.C_obs,
-        K_grid=res["K_grid"],
-        T_grid=res["T_grid"],
-        C_fit=res["C_fit"],
-        title=title,
-        fitted_alpha=fitted_alpha,
-        obs_size=obs_size,
-        downsample_obs=downsample_obs,
-    )
 
 def iv_surface_plot(
     res: dict,
@@ -620,24 +592,17 @@ def iv_surface_plot(
     x_axis: str = "K",                            # {"K","R","r"}
     x_bounds: tuple[float, float] | None = None,  # bounds in chosen x units
     spot: float | None = None,                    # S0; required for {"R","r"} unless in res
-    # ---- NEW (for subplot support) ----
-    ax=None,                                      # matplotlib 3d axis to draw into
-    add_colorbar: bool = True,                    # whether to add a colorbar
+    # subplot support
+    ax=None,
+    add_colorbar: bool = True,
 ):
     """
     IV surface plot (static Matplotlib or interactive Plotly).
 
-    x_axis:
-      "K": x = K
-      "R": x = K/S0
-      "r": x = log(K/S0)
-
-    x_bounds applied in chosen x units.
-
-    Expects:
-      - res["iv_surface"] : array (len(T_grid), len(K_grid))
-      - res["K_grid"]     : array (nK,)
-      - res["T_grid"]     : array (nT,)
+    Returns
+    -------
+    fig, ax, surf     (static Matplotlib case)
+    fig               (interactive Plotly case)
     """
     import numpy as np
     from pathlib import Path
@@ -730,7 +695,7 @@ def iv_surface_plot(
             if save.suffix.lower() == ".html":
                 fig.write_html(save)
             else:
-                fig.write_image(save)  # needs kaleido
+                fig.write_image(save)
             print(f"[saved] {save}")
 
         if show:
@@ -760,7 +725,8 @@ def iv_surface_plot(
         shade=shade,
     )
 
-    if add_colorbar:
+    # ---- colorbar only for standalone figure
+    if add_colorbar and created_fig:
         fig.colorbar(surf, ax=ax, shrink=0.6, pad=0.08, label="IV")
 
     ax.set_title(title)
@@ -772,16 +738,16 @@ def iv_surface_plot(
     if created_fig:
         plt.tight_layout()
 
-        if save is not None:
-            save = Path(save)
-            save.parent.mkdir(parents=True, exist_ok=True)
-            fig.savefig(save, dpi=dpi, bbox_inches="tight")
-            print(f"[saved] {save}")
+    if save is not None:
+        save = Path(save)
+        save.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save, dpi=dpi, bbox_inches="tight")
+        print(f"[saved] {save}")
 
-        if show:
-            plt.show()
-        else:
-            plt.close(fig)
+    if show and created_fig:
+        plt.show()
+    elif created_fig and not show:
+        plt.close(fig)
 
     return fig, ax, surf
 
@@ -1005,7 +971,7 @@ def call_surface_vs_observed(
     date_str: Optional[str] = None,
     spot: Optional[float] = None,
     # surface rendering controls
-    surface_stride: int = 2,       # larger -> faster / less dense surface
+    surface_stride: int = 2,
     surface_alpha: float = 0.55,
     # observed scatter controls
     obs_size: float = 18.0,
@@ -1014,21 +980,18 @@ def call_surface_vs_observed(
     save: Optional[Union[str, Path]] = None,
     dpi: int = 220,
     show: bool = True,
-    # ---- NEW ----
-    x_axis: str = "K",                            # {"K","R","r"}
+    # axis controls
+    x_axis: str = "K",                             # {"K","R","r"}
     x_bounds: tuple[float, float] | None = None,  # bounds in chosen x units
+    # subplot support
+    ax=None,
 ):
     """
     3D plot: fitted call surface (x,T -> C) with observed quotes overlay.
 
-    x_axis:
-      "K": x = K
-      "R": x = K/S0
-      "r": x = log(K/S0)
-
-    Notes:
-      - For x_axis in {"R","r"}, spot/S0 must be available (inferred or passed).
-      - x_bounds are applied in chosen x units.
+    Returns
+    -------
+    fig, ax, surf
     """
     import numpy as np
     import matplotlib.pyplot as plt
@@ -1039,7 +1002,7 @@ def call_surface_vs_observed(
         raise KeyError("Missing fitted surface. Expected res['C_fit'].")
     K_grid = np.asarray(res["K_grid"], float).ravel()
     T_grid = np.asarray(res["T_grid"], float).ravel()
-    C_fit  = np.asarray(res["C_fit"], float)
+    C_fit = np.asarray(res["C_fit"], float)
 
     if C_fit.shape != (T_grid.size, K_grid.size):
         raise ValueError("res['C_fit'] must have shape (len(T_grid), len(K_grid)).")
@@ -1074,7 +1037,7 @@ def call_surface_vs_observed(
     if x_axis in {"R", "r"} and spot is None:
         raise ValueError("spot/S0 is required when x_axis is 'R' or 'r'.")
 
-    # ---- apply x_bounds by masking on K-grid (then transform x)
+    # ---- apply x_bounds by masking on K-grid
     if x_bounds is None:
         k_mask = np.isfinite(K_grid)
     else:
@@ -1099,7 +1062,7 @@ def call_surface_vs_observed(
         X_grid = Kp
         X_obs = K_obs
         xlabel = "Strike K"
-        spot_line_x = spot  # vertical line at K=spot
+        spot_line_x = spot
         show_spot_line = (spot is not None) and np.isfinite(spot)
     elif x_axis == "R":
         X_grid = Kp / spot
@@ -1107,7 +1070,7 @@ def call_surface_vs_observed(
         xlabel = "Gross return R = K/S0"
         spot_line_x = 1.0
         show_spot_line = True
-    else:  # x_axis == "r"
+    else:  # r
         X_grid = np.log(Kp / spot)
         X_obs = np.log(K_obs / spot)
         xlabel = "Log return r = log(K/S0)"
@@ -1123,18 +1086,46 @@ def call_surface_vs_observed(
     TTp = TT[::s, ::s]
     Cp2 = Cp[::s, ::s]
 
-    # ---- plot
-    fig = plt.figure(figsize=(11.5, 9.5))
-    ax = fig.add_subplot(111, projection="3d")
+    # ---- figure / axis handling
+    created_fig = False
+    if ax is None:
+        fig = plt.figure(figsize=(10, 7))
+        ax = fig.add_subplot(111, projection="3d")
+        created_fig = True
+    else:
+        fig = ax.figure
 
-    ax.plot_surface(XXp, TTp, Cp2, linewidth=0, antialiased=True, alpha=float(surface_alpha))
-    ax.scatter(X_obs, T_obs, C_obs, s=float(obs_size), alpha=float(obs_alpha), label="Observed")
+    # ---- plot surface
+    surf = ax.plot_surface(
+        XXp,
+        TTp,
+        Cp2,
+        linewidth=0,
+        antialiased=True,
+        alpha=float(surface_alpha),
+    )
 
-    # optional spot "curtain" on base plane
+    # ---- observed quotes
+    ax.scatter(
+        X_obs,
+        T_obs,
+        C_obs,
+        s=float(obs_size),
+        alpha=float(obs_alpha),
+        label="Observed",
+    )
+
+    # ---- spot line on base plane
     if show_spot_line and (spot_line_x is not None) and np.isfinite(spot_line_x):
         tmin, tmax = float(np.min(T_grid)), float(np.max(T_grid))
-        ax.plot([spot_line_x, spot_line_x], [tmin, tmax], [0.0, 0.0],
-                linestyle="--", linewidth=2.0, label="Spot")
+        ax.plot(
+            [spot_line_x, spot_line_x],
+            [tmin, tmax],
+            [0.0, 0.0],
+            linestyle="--",
+            linewidth=2.0,
+            label="Spot",
+        )
 
     ttl = title
     if date_str:
@@ -1143,12 +1134,15 @@ def call_surface_vs_observed(
     ax.set_xlabel(xlabel)
     ax.set_ylabel("Maturity T (years)")
     ax.set_zlabel("Call price C")
+    ax.view_init(elev=28, azim=-60)
 
+    # ---- legend only for standalone figure
     handles, labels = ax.get_legend_handles_labels()
-    if handles:
+    if handles and created_fig:
         ax.legend(loc="upper left")
 
-    plt.tight_layout()
+    if created_fig:
+        plt.tight_layout()
 
     if save is not None:
         save = Path(save)
@@ -1158,148 +1152,14 @@ def call_surface_vs_observed(
         fig.savefig(save, dpi=int(dpi), bbox_inches="tight")
         print(f"[saved] {save}")
 
-    if show:
+    if show and created_fig:
         plt.show()
+    elif created_fig and not show:
+        plt.close(fig)
 
-    return fig
+    return fig, ax, surf
 
-# def plot_delta_surface(
-#     res: dict,
-#     *,
-#     which: Literal["call", "put", "skew"] = "call",
-#     title: str = "IV in Delta Space",
-#     cmap: str = "viridis",
-#     interactive: bool = False,
-#     save: Optional[Union[str, Path]] = None,
-#     dpi: int = 200,
-#     elev: float = 25.0,
-#     azim: float = -60.0,
-# ):
-#     """
-#     Plot delta-based surfaces stored in res["delta_dict"].
 
-#     Expects res["delta_dict"] with keys:
-#       - "delta_axis": (nD,)
-#       - "T_axis": (nT,)
-#       - "iv_delta_call": (nT, nD)
-#       - "iv_delta_put_abs": (nT, nD)
-#       - "delta_skew_surface": (nT, nD)
-
-#     Parameters
-#     ----------
-#     which:
-#       "call" -> iv_delta_call
-#       "put"  -> iv_delta_put_abs
-#       "skew" -> delta_skew_surface
-#     interactive:
-#       If True, uses Plotly surface (HTML output if saved).
-#       If False, uses Matplotlib 3D surface (PNG output if saved).
-#     save:
-#       If provided, saves the figure. Creates parent folders if needed.
-#       - static: saves via fig.savefig(...)
-#       - interactive: saves via plotly.write_html(...)
-#     """
-
-#     if "delta_dict" not in res or res["delta_dict"] is None:
-#         raise KeyError("Missing delta_dict. Expected res['delta_dict'].")
-
-#     d = res["delta_dict"]
-
-#     delta = np.asarray(d["delta_axis"], float).ravel()
-#     T = np.asarray(d["T_axis"], float).ravel()
-
-#     if which == "call":
-#         Z = np.asarray(d["iv_delta_call"], float)
-#         zlabel = "IV(call delta)"
-#     elif which == "put":
-#         Z = np.asarray(d["iv_delta_put_abs"], float)
-#         zlabel = "IV(|put delta|)"
-#     elif which == "skew":
-#         Z = np.asarray(d["delta_skew_surface"], float)
-#         zlabel = "Delta skew = (IV_call - IV_put)/IV_atm"
-#     else:
-#         raise ValueError("which must be one of {'call','put','skew'}.")
-
-#     if Z.shape != (T.size, delta.size):
-#         raise ValueError(
-#             f"Surface has shape {Z.shape}, expected {(T.size, delta.size)} from T_axis/delta_axis."
-#         )
-
-#     # mesh: X=delta, Y=T
-#     X, Y = np.meshgrid(delta, T)
-
-#     # ---------------------------
-#     # Interactive (Plotly)
-#     # ---------------------------
-#     if interactive:
-#         try:
-#             import plotly.graph_objects as go
-#         except ImportError as e:
-#             raise ImportError(
-#                 "Plotly is required for interactive=True. Install with: pip install plotly"
-#             ) from e
-
-#         fig = go.Figure(
-#             data=[
-#                 go.Surface(
-#                     x=X,
-#                     y=Y,
-#                     z=Z,
-#                     colorscale=cmap,  # plotly accepts many named scales; if not found, it errors
-#                     showscale=True,
-#                 )
-#             ]
-#         )
-#         fig.update_layout(
-#             title=title,
-#             scene=dict(
-#                 xaxis_title="Delta",
-#                 yaxis_title="Maturity T (years)",
-#                 zaxis_title=zlabel,
-#             ),
-#             margin=dict(l=0, r=0, t=50, b=0),
-#         )
-
-#         if save is not None:
-#             save = Path(save)
-#             save.parent.mkdir(parents=True, exist_ok=True)
-#             # default extension
-#             if save.suffix.lower() not in {".html"}:
-#                 save = save.with_suffix(".html")
-#             fig.write_html(str(save))
-#             print(f"[saved] {save}")
-
-#         fig.show()
-#         return fig
-
-#     # ---------------------------
-#     # Static (Matplotlib)
-#     # ---------------------------
-#     fig = plt.figure(figsize=(10.0, 8.0))
-#     ax = fig.add_subplot(111, projection="3d")
-
-#     surf = ax.plot_surface(X, Y, Z, cmap=cmap, linewidth=0, antialiased=True, alpha=0.95)
-#     fig.colorbar(surf, ax=ax, shrink=0.7, pad=0.08)
-
-#     ax.set_title(title)
-#     ax.set_xlabel("Delta")
-#     ax.set_ylabel("Maturity T (years)")
-#     ax.set_zlabel(zlabel)
-#     ax.view_init(elev=elev, azim=azim)
-
-#     fig.tight_layout()
-
-#     if save is not None:
-#         save = Path(save)
-#         save.parent.mkdir(parents=True, exist_ok=True)
-#         # default extension
-#         if save.suffix == "":
-#             save = save.with_suffix(".png")
-#         fig.savefig(save, dpi=dpi, bbox_inches="tight")
-#         print(f"[saved] {save}")
-
-#     plt.show()
-#     return fig
 def plot_delta_surface(
     res: dict,
     *,

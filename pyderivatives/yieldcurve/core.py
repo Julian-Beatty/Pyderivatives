@@ -22,11 +22,11 @@ class create_yield_curve:
     def __post_init__(self):
         if "Date" not in self.df.columns:
             raise ValueError("DataFrame must contain a 'Date' column.")
-
+    
         df = self.df.copy()
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
         df = df.dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
-
+    
         mats = []
         taus = []
         for c in df.columns:
@@ -36,17 +36,19 @@ class create_yield_curve:
             if t is not None:
                 mats.append(c)
                 taus.append(t)
-
+    
         if not mats:
             raise ValueError("No maturity columns detected (expected like '1M','6M','1Y',...).")
-
+    
         # sort by maturity
         order = np.argsort(np.array(taus))
         self.maturity_cols = [mats[i] for i in order]
         self.taus_years = np.array([taus[i] for i in order], float)
-
+    
+    
         # store cleaned df
         self.df = df
+        print("Ran successfully")
 
     def fit(self, model: str, *args, **kwargs):
         """

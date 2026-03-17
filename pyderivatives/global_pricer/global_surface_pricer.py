@@ -164,6 +164,7 @@ class GlobalSurfacePricer:
         self.model_ = model
         self.state_ = state
         self.day_meta_ = {"S0": float(day.S0), "r": float(day.r), "q": float(q_use)}
+        self.bounds=bounds
         return state
 
     def price(
@@ -226,10 +227,15 @@ class GlobalSurfacePricer:
             "S0": float(day.S0),
             "r": float(day.r),
             "q": float(q_use),
+        
+            "ticker": getattr(day, "ticker", "Unknown"),   # <-- ADD THIS LINE
+        
             "K_grid": K_grid,
             "T_grid": T_grid,
             "C_fit": np.asarray(C_fit, float),
             "meta": dict(self.state_.fit_meta),
+            "day": day,
+            "bounds_spec": self.bounds,
         }
 
         # ========= RND via BL (+ safety clip) =========

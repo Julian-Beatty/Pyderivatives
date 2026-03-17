@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from typing import Dict, Sequence, Optional, Union, Tuple, Any
 import pandas as pd
-
+from typing import Literal
 def plot_result_dict(
     plot_dict: Dict[str, dict],
     maturity_list: Sequence[Union[int, float]],
@@ -561,12 +561,12 @@ def plot_pricing_kernel_3d_surface_by_T(
     *,
     anchor_key: str = "anchor_surfaces",
     kernel_key: str = "mK_surface",
-    fP_key: str = "fP_surface",        # physical density used for truncation
+    fP_key: str = "fP_surface",
     r_key: str = "r_common",
     T_key: str = "T_anchor",
 
-    # x-axis
-    x_mode: str = "log",               # {"log","gross"}
+    # axis controls
+    x_axis: str = "r",                            # {"R","r"}
     x_bounds: tuple[float, float] | None = None,
 
     # thinning
@@ -574,52 +574,52 @@ def plot_pricing_kernel_3d_surface_by_T(
     stride: int | None = None,
 
     # z scaling
-    z_mode: str = "log",               # {"level","log"}
+    zscale: Literal["linear", "log"] = "log",
     z_eps: float = 1e-300,
 
     # appearance
+    title: str = "Pricing Kernel Surface",
     cmap: str = "viridis",
-
-    # NEW: truncate plotting window by physical tail mass (per date)
-    truncate_by_ptails: bool = False,
-    ptail_alphas: tuple[float, float] = (0.01, 0.01),  # (alpha_left, alpha_right)
-
-    # output
-    title: str | None = None,
-    save: str | Path | None = None,
     dpi: int = 200,
-
-    # interactive
     interactive: bool = False,
-    interactive_engine: str = "plotly",
-    save_html: str | Path | None = None,
+    show: bool = True,
+    alpha: float = 0.9,
+    elev: float = 28,
+    azim: float = -60,
 
-    # NEW: allow multi-panel plotting
-    ax=None,                           # pass an existing 3D Axes to draw on
-    add_colorbar: bool = True,         # set False for multi-panel grids; add one global later
-    clear_ax: bool = True,             # clear axes before plotting if reusing
+    # optional truncation by physical tails
+    truncate_by_ptails: bool = False,
+    ptail_alphas: tuple[float, float] = (0.01, 0.01),
+
+    # saving
+    save: str | Path | None = None,
+
+    # subplot support
+    ax=None,
+    add_colorbar: bool = True,
+    clear_ax: bool = True,
 ):
     """
-    3D surface: x=(log return r) OR x=(gross return exp(r)),
-                y=time (date),
-                z=pricing kernel at nearest maturity to T_target.
+    3D surface:
+      x = chosen return axis ("r" or "R")
+      y = calendar date
+      z = pricing kernel at maturity nearest to T_target
 
-    If truncate_by_ptails=True:
-      For EACH date-row, compute physical CDF from fP_surface at that T,
-      then keep only x where CDF in [alpha_left, 1-alpha_right].
-      Outside that interval, set Z to NaN (ragged edges in the surface).
-
-    Notes for multi-panel figures
-    -----------------------------
-    - Pass `ax=<existing 3D axes>` to plot into a subplot.
-    - For 2x2 grids, set `add_colorbar=False` for each call, then create a single
-      shared colorbar using the returned `surf` (see example after function).
+    Returns
+    -------
+    fig, ax, surf     (static matplotlib case)
+    fig               (interactive plotly case)
     """
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+    from pathlib import Path
 
-    if x_mode not in {"log", "gross"}:
-        raise ValueError("x_mode must be 'log' or 'gross'")
-    if z_mode not in {"level", "log"}:
-        raise ValueError("z_mode must be 'level' or 'log'")
+    if x_axis not in {"R", "r"}:
+        raise ValueError("x_axis must be one of {'R', 'r'}.")
+    if zscale not in {"linear", "log"}:
+        raise ValueError("zscale must be 'linear' or 'log'.")
     if truncate_by_ptails:
         aL, aR = float(ptail_alphas[0]), float(ptail_alphas[1])
         if not (0.0 <= aL < 1.0 and 0.0 <= aR < 1.0 and (aL + aR) < 1.0):
@@ -645,7 +645,7 @@ def plot_pricing_kernel_3d_surface_by_T(
     keys = [keys[i] for i in keep]
     date_ts = date_ts[keep]
 
-    # --- build Z(time, r) (and physical density rows if needed) ---
+    # --- build Z(date, r) ---
     r_ref = None
     T_used = None
     rows_Z = []
@@ -663,8 +663,8 @@ def plot_pricing_kernel_3d_surface_by_T(
 
         T_grid = np.asarray(day[T_key], float).ravel()
         r_grid = np.asarray(day[r_key], float).ravel()
-
         Ksurf = np.asarray(day[anchor_key][kernel_key], float)
+
         if Ksurf.ndim != 2:
             continue
 
@@ -674,9 +674,8 @@ def plot_pricing_kernel_3d_surface_by_T(
         if r_ref is None:
             r_ref = r_grid
             T_used = float(T_grid[j])
-            # CDF needs a monotone grid
             if not np.all(np.diff(r_ref) > 0):
-                raise ValueError("r_common must be strictly increasing for CDF-based truncation.")
+                raise ValueError("r_common must be strictly increasing.")
         else:
             if r_grid.shape != r_ref.shape or np.nanmax(np.abs(r_grid - r_ref)) > 1e-12:
                 continue
@@ -696,12 +695,12 @@ def plot_pricing_kernel_3d_surface_by_T(
             f"anchor_key='{anchor_key}', kernel_key='{kernel_key}', r_key='{r_key}', T_key='{T_key}'."
         )
 
-    Z = np.vstack(rows_Z)  # (nt, nr)
+    Z = np.vstack(rows_Z)
     kept_dates = pd.to_datetime(kept_dates)
 
-    # --- truncate each date-row by physical tail mass ---
+    # --- truncate by physical tail mass, row by row ---
     if truncate_by_ptails:
-        FP = np.vstack(rows_fP)  # (nt, nr)
+        FP = np.vstack(rows_fP)
         aL, aR = float(ptail_alphas[0]), float(ptail_alphas[1])
 
         for i in range(Z.shape[0]):
@@ -712,11 +711,9 @@ def plot_pricing_kernel_3d_surface_by_T(
                 continue
 
             rr = r_ref[good]
-            ff = np.maximum(fp[good], 0.0)  # clip small negative noise
-
+            ff = np.maximum(fp[good], 0.0)
             cdf = _cdf_from_pdf_trapz(rr, ff)
 
-            # keep rr where cdf in [aL, 1-aR]
             left_pos = int(np.searchsorted(cdf, aL, side="left"))
             right_pos = int(np.searchsorted(cdf, 1.0 - aR, side="right")) - 1
 
@@ -725,120 +722,146 @@ def plot_pricing_kernel_3d_surface_by_T(
                 continue
 
             keep_good = np.zeros(rr.size, dtype=bool)
-            keep_good[left_pos: right_pos + 1] = True
+            keep_good[left_pos:right_pos + 1] = True
 
             keep_full = np.zeros(r_ref.size, dtype=bool)
             keep_full[np.where(good)[0][keep_good]] = True
-
             Z[i, ~keep_full] = np.nan
 
-    # --- choose x axis ---
-    if x_mode == "log":
+    # --- choose x axis like your other functions ---
+    if x_axis == "r":
         x = r_ref.copy()
-        xlab = "log return r"
-    else:
+        xlabel = "Log return r = log(S_T/S0)"
+    else:  # "R"
         x = np.exp(r_ref)
-        xlab = "gross return R = exp(r)"
+        xlabel = "Gross return R"
 
-    # --- x_bounds in chosen units ---
+    # --- x bounds ---
     if x_bounds is not None:
         lo, hi = float(x_bounds[0]), float(x_bounds[1])
+        if lo >= hi:
+            raise ValueError("x_bounds must be (lo, hi) with lo < hi.")
         m = (x >= lo) & (x <= hi)
+        if not np.any(m):
+            raise ValueError("x_bounds produced an empty plotting window.")
         x = x[m]
         Z = Z[:, m]
 
     # --- z transform ---
-    if z_mode == "log":
-        Z_plot = np.log(np.maximum(Z, z_eps))
-        zlab = f"log({kernel_key})"
+    if zscale == "log":
+        Z_plot = np.where(np.isfinite(Z) & (Z > 0), np.log(np.maximum(Z, z_eps)), np.nan)
+        zlabel = "log M(T,r)" if x_axis == "r" else "log M(T,R)"
     else:
         Z_plot = Z
-        zlab = kernel_key
-
-    # --- title ---
-    ttl = title if title is not None else (
-        f"Pricing Kernel 3D Surface (T_target={T_target:.6f}y, used={T_used:.6f}y, x_mode={x_mode})"
-        + (f", ptails={ptail_alphas}" if truncate_by_ptails else "")
-    )
+        zlabel = "M(T,r)" if x_axis == "r" else "M(T,R)"
 
     # --- mesh ---
     y_num = mdates.date2num(kept_dates.to_pydatetime())
     X, Y = np.meshgrid(x, y_num)
 
-    # ----------------------------
-    # Interactive (Plotly)
-    # ----------------------------
+    # =========================
+    # INTERACTIVE (Plotly)
+    # =========================
     if interactive:
-        if interactive_engine != "plotly":
-            raise ValueError("interactive_engine currently only supports 'plotly'.")
-        try:
-            import plotly.graph_objects as go
-        except Exception as e:
-            raise ImportError("Plotly is required for interactive=True. Install with: pip install plotly") from e
+        import plotly.graph_objects as go
 
         y_labels = [d.strftime("%Y-%m-%d") for d in kept_dates]
 
         fig = go.Figure(
-            data=go.Surface(
-                x=x, y=y_labels, z=Z_plot,
-                colorscale=cmap,
-                showscale=True
-            )
+            data=[
+                go.Surface(
+                    x=X,
+                    y=np.array(y_labels)[:, None].repeat(len(x), axis=1),
+                    z=Z_plot,
+                    colorscale=cmap,
+                    colorbar=dict(title=zlabel),
+                )
+            ]
         )
+
         fig.update_layout(
-            title=ttl,
-            scene=dict(xaxis_title=xlab, yaxis_title="date", zaxis_title=zlab),
-            margin=dict(l=0, r=0, t=40, b=0),
+            title=title,
+            scene=dict(
+                xaxis_title=xlabel,
+                yaxis_title="Date",
+                zaxis_title=zlabel,
+            ),
+            margin=dict(l=0, r=0, t=55, b=0),
         )
 
-        html_path = None
-        if save_html is not None:
-            html_path = Path(save_html)
-        elif save is not None and str(save).lower().endswith(".html"):
-            html_path = Path(save)
+        if save is not None:
+            save = Path(save)
+            save.parent.mkdir(parents=True, exist_ok=True)
+            if save.suffix.lower() == ".html":
+                fig.write_html(save)
+            else:
+                fig.write_image(save)
+            print(f"[saved] {save}")
 
-        if html_path is not None:
-            html_path.parent.mkdir(parents=True, exist_ok=True)
-            fig.write_html(str(html_path), include_plotlyjs="cdn")
+        if show:
+            fig.show()
 
         return fig
 
-    # ----------------------------
-    # Static (Matplotlib) - supports multi-panel
-    # ----------------------------
+    # =========================
+    # STATIC (Matplotlib)
+    # =========================
+    created_fig = False
     if ax is None:
-        fig = plt.figure(figsize=(12, 7))
+        fig = plt.figure(figsize=(10, 7))
         ax = fig.add_subplot(111, projection="3d")
+        created_fig = True
     else:
         fig = ax.figure
         if clear_ax:
             ax.cla()
 
-    surf = ax.plot_surface(X, Y, Z_plot, linewidth=0, antialiased=True, cmap=cmap)
+    surf = ax.plot_surface(
+        X,
+        Y,
+        Z_plot,
+        cmap=cmap,
+        linewidth=0,
+        antialiased=True,
+        alpha=alpha,
+    )
 
-    ax.set_xlabel(xlab)
-    ax.set_ylabel("date")
-    ax.set_zlabel(zlab)
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("")  # avoid collision with date tick labels
+    ax.set_zlabel(zlabel)
+    ax.view_init(elev=elev, azim=azim)
+
     ax.yaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
-    ax.set_title(ttl)
+    try:
+        ax.set_yticks(y_num[::max(1, len(y_num)//6)])
+    except Exception:
+        pass
 
-    cbar = None
-    if add_colorbar:
-        cbar = fig.colorbar(surf, ax=ax, shrink=0.6, pad=0.08)
+    ax.xaxis.labelpad = 8
+    ax.yaxis.labelpad = 8
+    ax.zaxis.labelpad = 10
 
-    # Only tighten if we're not in a grid, otherwise the caller can do it once.
-    if ax is None:
-        fig.tight_layout()
+    if add_colorbar and created_fig:
+        fig.colorbar(surf, ax=ax, shrink=0.6, pad=0.08, label=zlabel)
 
-    # IO-friendly save (auto-create folder; auto-add .png)
+    if created_fig:
+        plt.tight_layout()
+
     if save is not None:
         save_path = Path(save)
         if save_path.suffix == "":
             save_path = save_path.with_suffix(".png")
         save_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        print(f"[saved] {save_path}")
 
-    return fig, ax, surf, cbar
+    if show and created_fig:
+        plt.show()
+    elif created_fig and not show:
+        plt.close(fig)
+
+    return fig, ax, surf
 
 
 import numpy as np

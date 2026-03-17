@@ -253,121 +253,6 @@ def _maybe_save_matplotlib(fig, save: str | None, dpi: int = 200):
     print(f"[saved] {save}")
 
 
-# def physical_density_surface_plot(
-#     out: dict,
-#     *,
-#     title: str = "Physical Density Surface",
-#     cmap: str = "viridis",          # plotly colorscale name OR matplotlib cmap name
-#     save: str | None = None,        # .html (plotly) OR .png/.pdf/etc (mpl or plotly)
-#     interactive: bool = True,
-#     show: bool = True,
-#     R_bounds: tuple[float, float] | None = None,
-#     T_bounds: tuple[float, float] | None = None,
-#     dpi: int = 200,
-# ):
-#     """
-#     Plot physical density surface p(R|T).
-
-#     Requires (in `out`):
-#       out["anchor_surfaces"]["pR_surface"]
-#       out["R_common"]
-#       out["T_anchor"]
-
-#     interactive=True  -> Plotly 3D surface
-#     interactive=False -> Matplotlib 3D surface
-#     """
-
-#     anchor = out.get("anchor_surfaces", None)
-#     if anchor is None or "pR_surface" not in anchor:
-#         raise KeyError("Expected out['anchor_surfaces']['pR_surface'].")
-
-#     p = np.asarray(anchor["pR_surface"], float)
-#     R_grid = np.asarray(out.get("R_common", []), float).ravel()
-#     T_grid = np.asarray(out.get("T_anchor", []), float).ravel()
-
-#     if R_grid.size == 0 or T_grid.size == 0:
-#         raise KeyError("Expected out['R_common'] and out['T_anchor'].")
-
-#     if p.shape != (T_grid.size, R_grid.size):
-#         raise ValueError("pR_surface must have shape (len(T_anchor), len(R_common)).")
-
-#     T_plot, R_plot, p_plot = _slice_bounds_2d(T_grid, R_grid, p, T_bounds=T_bounds, R_bounds=R_bounds)
-#     if T_plot.size < 2 or R_plot.size < 2:
-#         raise ValueError("Not enough points to plot after applying bounds.")
-
-#     date_label = out.get("anchor_key_used", out.get("anchor_date_used", ""))
-#     plot_title = f"{title} — {date_label}" if date_label else title
-
-#     # -------------------- Matplotlib branch --------------------
-#     if not interactive:
-#         import matplotlib.pyplot as plt
-#         from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
-
-#         R_mesh, T_mesh = np.meshgrid(R_plot, T_plot)
-
-#         fig = plt.figure(figsize=(9.5, 6.5))
-#         ax = fig.add_subplot(111, projection="3d")
-#         surf = ax.plot_surface(R_mesh, T_mesh, p_plot, cmap=cmap, linewidth=0, antialiased=True)
-
-#         ax.set_title(plot_title)
-#         ax.set_xlabel("Gross return R")
-#         ax.set_ylabel("Maturity T (years)")
-#         ax.set_zlabel("p(R|T)")
-
-#         cbar = fig.colorbar(surf, ax=ax, shrink=0.65, pad=0.08)
-#         cbar.set_label("p(R)")
-
-#         fig.tight_layout()
-#         _maybe_save_matplotlib(fig, save, dpi=dpi)
-
-#         if show:
-#             plt.show()
-#         return fig
-
-#     # -------------------- Plotly branch --------------------
-#     import plotly.graph_objects as go
-
-#     R_mesh, T_mesh = np.meshgrid(R_plot, T_plot)
-
-#     fig = go.Figure(
-#         data=[
-#             go.Surface(
-#                 x=R_mesh,
-#                 y=T_mesh,
-#                 z=p_plot,
-#                 colorscale=cmap,
-#                 colorbar=dict(title="p(R)"),
-#             )
-#         ]
-#     )
-
-#     fig.update_layout(
-#         title=plot_title,
-#         scene=dict(
-#             xaxis_title="Gross return R",
-#             yaxis_title="Maturity T (years)",
-#             zaxis_title="p(R|T)",
-#         ),
-#         margin=dict(l=0, r=0, t=50, b=0),
-#     )
-
-#     if save is not None:
-#         save = str(save)
-#         folder = os.path.dirname(save) or "."
-#         os.makedirs(folder, exist_ok=True)
-
-#         if save.lower().endswith(".html"):
-#             fig.write_html(save)
-#             print(f"[saved] {save}")
-#         else:
-#             # Image export: requires `pip install -U kaleido`
-#             fig.write_image(save)
-#             print(f"[saved] {save}")
-
-#     if show:
-#         fig.show()
-
-#     return fig
 
 
 def rra_surface_plot(
@@ -376,23 +261,38 @@ def rra_surface_plot(
     title: str = "Relative Risk Aversion Surface",
     cmap: str = "viridis",
     save: str | None = None,
-    interactive: bool = True,
-    show: bool = True,
-    R_bounds: tuple[float, float] | None = None,
-    T_bounds: tuple[float, float] | None = None,
     dpi: int = 200,
+    interactive: bool = False,
+    show: bool = True,
+    alpha: float = 0.9,
+    elev: float = 28,
+    azim: float = -60,
+    x_axis: str = "R",
+    x_bounds: tuple[float, float] | None = None,
+    T_bounds: tuple[float, float] | None = None,
+    ax=None,
+    add_colorbar: bool = True,
 ):
     """
-    Plot RRA surface RRA(R|T).
+    Plot RRA surface.
 
-    Requires (in `out`):
+    x_axis:
+      "R" -> RRA(R|T), using out["anchor_surfaces"]["RRA_surface"] and out["R_common"]
+      "r" -> RRA(exp(r)|T), using out["anchor_surfaces"]["RRA_surface"] and log(out["R_common"])
+      "K" -> RRA(K/S0|T), using out["anchor_surfaces"]["RRA_surface"] and K = S0 * R
+
+    Requires:
       out["anchor_surfaces"]["RRA_surface"]
       out["R_common"]
       out["T_anchor"]
 
-    interactive=True  -> Plotly 3D surface
-    interactive=False -> Matplotlib 3D surface
+    Returns
+    -------
+    fig, ax, surf     (static matplotlib case)
+    fig               (interactive plotly case)
     """
+    import numpy as np
+    from pathlib import Path
 
     anchor = out.get("anchor_surfaces", None)
     if anchor is None or "RRA_surface" not in anchor:
@@ -408,83 +308,142 @@ def rra_surface_plot(
     if RRA.shape != (T_grid.size, R_grid.size):
         raise ValueError("RRA_surface must have shape (len(T_anchor), len(R_common)).")
 
-    T_plot, R_plot, RRA_plot = _slice_bounds_2d(T_grid, R_grid, RRA, T_bounds=T_bounds, R_bounds=R_bounds)
-    if T_plot.size < 2 or R_plot.size < 2:
+    # ---- choose x-axis representation ----
+    x_axis = str(x_axis).strip()
+    if x_axis not in {"R", "r", "K"}:
+        raise ValueError("x_axis must be one of {'R', 'r', 'K'}.")
+
+    if x_axis == "R":
+        X_grid = R_grid.copy()
+        xlabel = "Gross return R"
+        zlabel = "RRA(R|T)"
+    elif x_axis == "r":
+        if np.any(R_grid <= 0):
+            raise ValueError("R_common must be strictly positive to use x_axis='r'.")
+        X_grid = np.log(R_grid)
+        xlabel = "Log return r = log(S_T/S0)"
+        zlabel = "RRA(r|T)"
+    else:  # "K"
+        meta = out.get("meta", {}) if isinstance(out.get("meta", {}), dict) else {}
+        S0 = (
+            out.get("S0", None)
+            or out.get("s0", None)
+            or meta.get("S0", None)
+            or meta.get("s0", None)
+        )
+        if S0 is None:
+            raise ValueError("S0 is required in `out` or out['meta'] to use x_axis='K'.")
+        S0 = float(S0)
+        X_grid = S0 * R_grid
+        xlabel = "Strike K"
+        zlabel = "RRA(K|T)"
+
+    # ---- apply bounds in chosen x-space ----
+    T_plot, X_plot, RRA_plot = _slice_surface_bounds(
+        T_grid,
+        X_grid,
+        RRA,
+        T_bounds=T_bounds,
+        x_bounds=x_bounds,
+    )
+
+    if T_plot.size < 2 or X_plot.size < 2:
         raise ValueError("Not enough points to plot after applying bounds.")
 
     date_label = out.get("anchor_key_used", out.get("anchor_date_used", ""))
     plot_title = f"{title} — {date_label}" if date_label else title
 
-    # -------------------- Matplotlib branch --------------------
-    if not interactive:
-        import matplotlib.pyplot as plt
-        from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+    X_mesh, T_mesh = np.meshgrid(X_plot, T_plot)
 
-        R_mesh, T_mesh = np.meshgrid(R_plot, T_plot)
+    # =========================
+    # INTERACTIVE (Plotly)
+    # =========================
+    if interactive:
+        import plotly.graph_objects as go
 
-        fig = plt.figure(figsize=(9.5, 6.5))
-        ax = fig.add_subplot(111, projection="3d")
-        surf = ax.plot_surface(R_mesh, T_mesh, RRA_plot, cmap=cmap, linewidth=0, antialiased=True)
+        fig = go.Figure(
+            data=[
+                go.Surface(
+                    x=X_mesh,
+                    y=T_mesh,
+                    z=RRA_plot,
+                    colorscale=cmap,
+                    colorbar=dict(title="RRA"),
+                )
+            ]
+        )
 
-        ax.set_title(plot_title)
-        ax.set_xlabel("Gross return R")
-        ax.set_ylabel("Maturity T (years)")
-        ax.set_zlabel("RRA(R|T)")
+        fig.update_layout(
+            title=plot_title,
+            scene=dict(
+                xaxis_title=xlabel,
+                yaxis_title="Maturity T (years)",
+                zaxis_title=zlabel,
+            ),
+            margin=dict(l=0, r=0, t=50, b=0),
+        )
 
-        cbar = fig.colorbar(surf, ax=ax, shrink=0.65, pad=0.08)
-        cbar.set_label("RRA")
-
-        fig.tight_layout()
-        _maybe_save_matplotlib(fig, save, dpi=dpi)
+        if save is not None:
+            save = Path(save)
+            save.parent.mkdir(parents=True, exist_ok=True)
+            if save.suffix.lower() == ".html":
+                fig.write_html(save)
+            else:
+                fig.write_image(save)
+            print(f"[saved] {save}")
 
         if show:
-            plt.show()
+            fig.show()
+
         return fig
 
-    # -------------------- Plotly branch --------------------
-    import plotly.graph_objects as go
+    # =========================
+    # STATIC (Matplotlib)
+    # =========================
+    import matplotlib.pyplot as plt
 
-    R_mesh, T_mesh = np.meshgrid(R_plot, T_plot)
+    created_fig = False
+    if ax is None:
+        fig = plt.figure(figsize=(10, 7))
+        ax = fig.add_subplot(111, projection="3d")
+        created_fig = True
+    else:
+        fig = ax.figure
 
-    fig = go.Figure(
-        data=[
-            go.Surface(
-                x=R_mesh,
-                y=T_mesh,
-                z=RRA_plot,
-                colorscale=cmap,
-                colorbar=dict(title="RRA"),
-            )
-        ]
+    surf = ax.plot_surface(
+        X_mesh,
+        T_mesh,
+        RRA_plot,
+        cmap=cmap,
+        linewidth=0,
+        antialiased=True,
+        alpha=alpha,
     )
 
-    fig.update_layout(
-        title=plot_title,
-        scene=dict(
-            xaxis_title="Gross return R",
-            yaxis_title="Maturity T (years)",
-            zaxis_title="RRA(R|T)",
-        ),
-        margin=dict(l=0, r=0, t=50, b=0),
-    )
+    if add_colorbar and created_fig:
+        fig.colorbar(surf, ax=ax, shrink=0.6, pad=0.08, label="RRA")
+
+    ax.set_title(plot_title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Maturity T (years)")
+    ax.set_zlabel(zlabel)
+    ax.view_init(elev=elev, azim=azim)
+
+    if created_fig:
+        plt.tight_layout()
 
     if save is not None:
-        save = str(save)
-        folder = os.path.dirname(save) or "."
-        os.makedirs(folder, exist_ok=True)
+        save = Path(save)
+        save.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save, dpi=dpi, bbox_inches="tight")
+        print(f"[saved] {save}")
 
-        if save.lower().endswith(".html"):
-            fig.write_html(save)
-            print(f"[saved] {save}")
-        else:
-            # Image export: requires `pip install -U kaleido`
-            fig.write_image(save)
-            print(f"[saved] {save}")
+    if show and created_fig:
+        plt.show()
+    elif created_fig and not show:
+        plt.close(fig)
 
-    if show:
-        fig.show()
-
-    return fig
+    return fig, ax, surf
 
 import os
 from pathlib import Path
@@ -615,160 +574,274 @@ def _maybe_save(fig, save: Optional[Union[str, Path]], dpi: int):
 # Panels: Physical density
 # ----------------------------
 
+
+def _slice_surface_bounds(
+    T_grid,
+    X_grid,
+    Z,
+    *,
+    T_bounds=None,
+    x_bounds=None,
+):
+    import numpy as np
+
+    T_grid = np.asarray(T_grid, float).ravel()
+    X_grid = np.asarray(X_grid, float).ravel()
+    Z = np.asarray(Z, float)
+
+    if Z.shape != (T_grid.size, X_grid.size):
+        raise ValueError("Z must have shape (len(T_grid), len(X_grid)).")
+
+    t_mask = np.isfinite(T_grid)
+    x_mask = np.isfinite(X_grid)
+
+    if T_bounds is not None:
+        t_lo, t_hi = map(float, T_bounds)
+        if t_lo >= t_hi:
+            raise ValueError("T_bounds must satisfy lo < hi.")
+        t_mask &= (T_grid >= t_lo) & (T_grid <= t_hi)
+
+    if x_bounds is not None:
+        x_lo, x_hi = map(float, x_bounds)
+        if x_lo >= x_hi:
+            raise ValueError("x_bounds must satisfy lo < hi.")
+        x_mask &= (X_grid >= x_lo) & (X_grid <= x_hi)
+
+    if not np.any(t_mask):
+        raise ValueError("T_bounds produced an empty plotting window.")
+    if not np.any(x_mask):
+        raise ValueError("x_bounds produced an empty plotting window.")
+
+    T_plot = T_grid[t_mask]
+    X_plot = X_grid[x_mask]
+    Z_plot = Z[np.ix_(t_mask, x_mask)]
+
+    return T_plot, X_plot, Z_plot
+
+
 def physical_density_surface_plot(
     out: dict,
     *,
     title: str = "Physical Density Surface",
     cmap: str = "viridis",
     save: str | None = None,
-    interactive: bool = True,
-    show: bool = True,
-    space: str = "gross",                 # "gross" | "log" | "strike"
-    x_bounds: tuple[float, float] | None = None,
-    R_bounds: tuple[float, float] | None = None,   # backward compat: treated as x_bounds if provided
-    T_bounds: tuple[float, float] | None = None,
     dpi: int = 200,
+    interactive: bool = False,
+    show: bool = True,
+    alpha: float = 0.9,
+    elev: float = 28,
+    azim: float = -60,
+    x_axis: str = "R",
+    x_bounds: tuple[float, float] | None = None,
+    T_bounds: tuple[float, float] | None = None,
+    ax=None,
+    add_colorbar: bool = True,
 ):
     """
-    Plot physical density surface in one of three spaces:
+    Plot physical density surface in one of three x-axis parameterizations.
 
-      space="gross"  -> p(R|T)  using out["anchor_surfaces"]["pR_surface"] and out["R_common"]
-      space="log"    -> f_P(r|T) using out["anchor_surfaces"]["fP_r_surface"] and out["r_common"]
-      space="strike" -> p(K|T)  using out["anchor_surfaces"]["pK_surface"] and out["K_common"]
+    x_axis:
+      "R" -> p(R|T), using out["anchor_surfaces"]["pR_surface"] and out["R_common"]
+      "r" -> f_P(r|T), using out["anchor_surfaces"]["fP_r_surface"] and out["r_common"]
+      "K" -> p(K|T), using out["anchor_surfaces"]["pK_surface"] and out["K_common"]
 
-    Requires:
-      out["T_anchor"]
-      and the corresponding surface/grid depending on `space`.
-
-    interactive=True  -> Plotly 3D surface (if you have that branch elsewhere)
-    interactive=False -> Matplotlib 3D surface
+    Returns
+    -------
+    fig, ax, surf     (static matplotlib case)
+    fig               (interactive plotly case)
     """
     import numpy as np
+    from pathlib import Path
 
     anchor = out.get("anchor_surfaces", None)
     if anchor is None:
         raise KeyError("Expected out['anchor_surfaces'].")
 
-    # --- backward compatibility ---
-    if x_bounds is None and R_bounds is not None:
-        x_bounds = R_bounds
+    x_axis = str(x_axis).strip()
+    if x_axis not in {"R", "r", "K"}:
+        raise ValueError("x_axis must be one of {'R', 'r', 'K'}.")
 
-    space = str(space).lower().strip()
-
-    if space in ("gross", "r", "return", "returns"):
+    if x_axis == "R":
         surf_key = "pR_surface"
         x_key = "R_common"
-        x_label = "Gross return R"
-        z_label = "p(R|T)"
-        default_title = "Physical Density Surface (Gross Return)"
-    elif space in ("log", "lr", "logreturn", "log_return", "rlog"):
+        xlabel = "Gross return R"
+        zlabel = "p(R|T)"
+        default_title = "Physical Density Surface"
+    elif x_axis == "r":
         surf_key = "fP_r_surface"
         x_key = "r_common"
-        x_label = "Log return r = log(S_T/S0)"
-        z_label = "f_P(r|T)"
-        default_title = "Physical Density Surface (Log Return)"
-    elif space in ("strike", "k", "price", "spot"):
+        xlabel = "Log return r = log(S_T/S0)"
+        zlabel = "f_P(r|T)"
+        default_title = "Physical Density Surface"
+    else:  # "K"
         surf_key = "pK_surface"
         x_key = "K_common"
-        x_label = "Strike / terminal price K (S_T)"
-        z_label = "p(K|T)"
-        default_title = "Physical Density Surface (Strike)"
-    else:
-        raise ValueError("space must be one of: 'gross', 'log', 'strike'")
+        xlabel = "Strike K"
+        zlabel = "p(K|T)"
+        default_title = "Physical Density Surface"
 
     if surf_key not in anchor:
         raise KeyError(f"Expected out['anchor_surfaces']['{surf_key}'].")
 
-    p = np.asarray(anchor[surf_key], float)
+    Z = np.asarray(anchor[surf_key], float)
     X_grid = np.asarray(out.get(x_key, []), float).ravel()
     T_grid = np.asarray(out.get("T_anchor", []), float).ravel()
 
     if X_grid.size == 0 or T_grid.size == 0:
         raise KeyError(f"Expected out['{x_key}'] and out['T_anchor'].")
 
-    if p.shape != (T_grid.size, X_grid.size):
+    if Z.shape != (T_grid.size, X_grid.size):
         raise ValueError(f"{surf_key} must have shape (len(T_anchor), len({x_key})).")
 
-    # Slice bounds using your helper; it expects names T_bounds and R_bounds,
-    # so we pass x-bounds via R_bounds param.
-    T_plot, X_plot, p_plot = _slice_bounds_2d(
-        T_grid, X_grid, p,
+    T_plot, X_plot, Z_plot = _slice_surface_bounds(
+        T_grid,
+        X_grid,
+        Z,
         T_bounds=T_bounds,
-        R_bounds=x_bounds,
+        x_bounds=x_bounds,
     )
+
     if T_plot.size < 2 or X_plot.size < 2:
         raise ValueError("Not enough points to plot after applying bounds.")
 
     date_label = out.get("anchor_key_used", out.get("anchor_date_used", ""))
-    base_title = title if title else default_title
-    plot_title = f"{base_title} — {date_label}" if date_label else base_title
-
-    # -------------------- Matplotlib branch --------------------
-    if not interactive:
-        import matplotlib.pyplot as plt
-        from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
-
-        X_mesh, T_mesh = np.meshgrid(X_plot, T_plot)
-
-        fig = plt.figure(figsize=(9.5, 6.5))
-        ax = fig.add_subplot(111, projection="3d")
-        surf = ax.plot_surface(X_mesh, T_mesh, p_plot, cmap=cmap, linewidth=0, antialiased=True)
-
-        ax.set_title(plot_title)
-        ax.set_xlabel(x_label)
-        ax.set_ylabel("Maturity T (years)")
-        ax.set_zlabel(z_label)
-
-        cbar = fig.colorbar(surf, ax=ax, shrink=0.65, pad=0.08)
-        cbar.set_label(z_label)
-
-        fig.tight_layout()
-        _maybe_save_matplotlib(fig, save, dpi=dpi)
-
-        if show:
-            plt.show()
-        return fig
-
-    # -------------------- Plotly branch --------------------
-    # If you already have a plotly surface helper, plug it in here.
-    # Keeping minimal: implement locally if needed.
-    import plotly.graph_objects as go
+    plot_title = title if title else default_title
+    if date_label:
+        plot_title = f"{plot_title} — {date_label}"
 
     X_mesh, T_mesh = np.meshgrid(X_plot, T_plot)
-    fig = go.Figure(
-        data=[
-            go.Surface(
-                x=X_mesh,
-                y=T_mesh,
-                z=p_plot,
-                colorscale=cmap,
-                showscale=True,
-                colorbar=dict(title=z_label),
-            )
-        ]
+
+    if interactive:
+        import plotly.graph_objects as go
+
+        fig = go.Figure(
+            data=[
+                go.Surface(
+                    x=X_mesh,
+                    y=T_mesh,
+                    z=Z_plot,
+                    colorscale=cmap,
+                    colorbar=dict(title=zlabel),
+                )
+            ]
+        )
+
+        fig.update_layout(
+            title=plot_title,
+            scene=dict(
+                xaxis_title=xlabel,
+                yaxis_title="Maturity T (years)",
+                zaxis_title=zlabel,
+            ),
+            margin=dict(l=0, r=0, t=55, b=0),
+        )
+
+        if save is not None:
+            save = Path(save)
+            save.parent.mkdir(parents=True, exist_ok=True)
+            if save.suffix.lower() == ".html":
+                fig.write_html(save)
+            else:
+                fig.write_image(save)
+            print(f"[saved] {save}")
+
+        if show:
+            fig.show()
+
+        return fig
+
+    import matplotlib.pyplot as plt
+
+    created_fig = False
+    if ax is None:
+        fig = plt.figure(figsize=(10, 7))
+        ax = fig.add_subplot(111, projection="3d")
+        created_fig = True
+    else:
+        fig = ax.figure
+
+    surf = ax.plot_surface(
+        X_mesh,
+        T_mesh,
+        Z_plot,
+        cmap=cmap,
+        linewidth=0,
+        antialiased=True,
+        alpha=alpha,
     )
-    fig.update_layout(
-        title=plot_title,
-        scene=dict(
-            xaxis_title=x_label,
-            yaxis_title="Maturity T (years)",
-            zaxis_title=z_label,
-        ),
-        margin=dict(l=0, r=0, b=0, t=40),
+
+    if add_colorbar and created_fig:
+        fig.colorbar(surf, ax=ax, shrink=0.6, pad=0.08, label=zlabel)
+
+    ax.set_title(plot_title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Maturity T (years)")
+    ax.set_zlabel(zlabel)
+    ax.view_init(elev=elev, azim=azim)
+
+    if created_fig:
+        plt.tight_layout()
+
+    if save is not None:
+        save = Path(save)
+        save.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save, dpi=dpi, bbox_inches="tight")
+        print(f"[saved] {save}")
+
+    if show and created_fig:
+        plt.show()
+    elif created_fig and not show:
+        plt.close(fig)
+
+    return fig, ax, surf
+
+    # =========================
+    # STATIC (Matplotlib)
+    # =========================
+    import matplotlib.pyplot as plt
+
+    created_fig = False
+    if ax is None:
+        fig = plt.figure(figsize=(10, 7))
+        ax = fig.add_subplot(111, projection="3d")
+        created_fig = True
+    else:
+        fig = ax.figure
+
+    surf = ax.plot_surface(
+        X_mesh,
+        T_mesh,
+        Z_plot,
+        cmap=cmap,
+        linewidth=0,
+        antialiased=True,
+        alpha=alpha,
     )
 
-    # Save (html recommended for plotly)
-    if save:
-        if save.lower().endswith(".html"):
-            fig.write_html(save)
-        else:
-            # requires kaleido installed for static images
-            fig.write_image(save, scale=2)
+    if add_colorbar and created_fig:
+        fig.colorbar(surf, ax=ax, shrink=0.6, pad=0.08, label=zlabel)
 
-    if show:
-        fig.show()
+    ax.set_title(plot_title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Maturity T (years)")
+    ax.set_zlabel(zlabel)
+    ax.view_init(elev=elev, azim=azim)
 
-    return fig
+    if created_fig:
+        plt.tight_layout()
+
+    if save is not None:
+        save = Path(save)
+        save.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save, dpi=dpi, bbox_inches="tight")
+        print(f"[saved] {save}")
+
+    if show and created_fig:
+        plt.show()
+    elif created_fig and not show:
+        plt.close(fig)
+
+    return fig, ax, surf
 
 def physical_density_panels(
     out: dict,
@@ -1155,29 +1228,39 @@ def P_Q_K_multipanel(
     panel_shape: Tuple[int, int] = (2, 4),
     save: Optional[Union[str, Path]] = None,
     dpi: int = 200,
+
+    # ----- x-axis controls -----
+    x_space: str = "gross",                         # {"gross","log"}  -> x=R or x=log(R)
+
     # ----- truncation controls -----
     truncate: bool = True,
-    ptail_alpha: Tuple[float, float] = (0.10, 0.0), # (alpha_left, alpha_right) for q-CDF tails
+    ptail_alpha: Tuple[float, float] = (0.10, 0.0), # (alpha_left, alpha_right) for CDF tails
     trunc_mode: str = "cdf",                        # {"cdf","rbounds","none","cdf+rbounds"}
-    r_bounds: Optional[Tuple[float, float]] = None,
+    r_bounds: Optional[Tuple[float, float]] = None, # bounds in chosen x_space
     clip_trunc_to_support: bool = True,
+
     # ----- kernel axis controls -----
     kernel_color: str = "black",
     kernel_linestyle: str = "--",
     kernel_yscale: str = "linear",                  # {"linear","log"}
     kernel_log_eps: float = 1e-300,
+
     # ----- display controls -----
     legend_loc: str = "upper center",
 ):
     """
-    Multi-panel plot: q_R(R), p_R(R) and pricing kernel M(R) with dual y-axis.
+    Multi-panel plot: q (risk-neutral), p (physical) and pricing kernel M with dual y-axis.
 
-    Key behavior:
-      - r_bounds truncates *everything* (q, p, and M) whenever enabled.
-      - ptail_alpha/CDF truncation affects *only* the kernel M(R):
-          keep kernel where q-CDF in [alpha_left, 1-alpha_right].
-        (computed on full support, then intersected with rbounds if active)
-      - You can use both by setting trunc_mode in {"cdf+rbounds","cdf"} with r_bounds provided.
+    x_space:
+      - "gross": x = R (gross return). Densities are q_R(R), p_R(R).
+      - "log"  : x = r = log(R). Densities are transformed: q_r(r)=q_R(R)*R, p_r(r)=p_R(R)*R.
+                Kernel values are unchanged: M(r)=M(R).
+
+    Truncation behavior:
+      - r_bounds truncates *everything* (q, p, and M) whenever enabled, in chosen x_space.
+      - ptail_alpha/CDF truncation affects *only* the kernel M, based on p-CDF on full support.
+        (computed on full support in R-space, then intersected with rbounds if active)
+      - Use both via trunc_mode="cdf+rbounds".
     """
     if out is None or "anchor_surfaces" not in out:
         raise KeyError("out must contain out['anchor_surfaces'].")
@@ -1188,7 +1271,7 @@ def P_Q_K_multipanel(
 
     qR = np.asarray(anchor.get("qR_surface", []), float)
     pR = np.asarray(anchor.get("pR_surface", []), float)
-    M = np.asarray(anchor.get("M_surface", []), float)
+    M  = np.asarray(anchor.get("M_surface",  []), float)
 
     if T.size == 0 or R.size == 0:
         raise ValueError("Missing T_anchor or R_common.")
@@ -1196,6 +1279,14 @@ def P_Q_K_multipanel(
         raise ValueError("qR_surface, pR_surface, M_surface must all have shape (len(T_anchor), len(R_common)).")
     if R.size >= 2 and np.any(np.diff(R) <= 0):
         raise ValueError("R_common must be strictly increasing.")
+
+    x_space = str(x_space).lower().strip()
+    if x_space not in {"gross", "log"}:
+        raise ValueError("x_space must be one of {'gross','log'}.")
+
+    if x_space == "log":
+        if np.any(~np.isfinite(R)) or np.any(R <= 0):
+            raise ValueError("x_space='log' requires all R_common > 0 and finite.")
 
     # -------------------------
     # parse truncation settings
@@ -1220,16 +1311,28 @@ def P_Q_K_multipanel(
             raise ValueError("Require ptail_alpha[0] + ptail_alpha[1] < 1.")
 
     # Determine rbounds range (if enabled)
+    # NOTE: r_bounds interpreted in chosen x_space; internally we convert to R_min/R_max.
     R_min = R_max = None
     if use_rbounds:
         if r_bounds is None or len(r_bounds) != 2:
-            raise ValueError("For rbounds truncation, provide r_bounds=(R_min, R_max).")
-        R_min, R_max = float(r_bounds[0]), float(r_bounds[1])
+            raise ValueError("For rbounds truncation, provide r_bounds=(low, high) in chosen x_space.")
+
+        b0, b1 = float(r_bounds[0]), float(r_bounds[1])
+        if not (np.isfinite(b0) and np.isfinite(b1) and b1 > b0):
+            raise ValueError("Invalid r_bounds.")
+
+        if x_space == "gross":
+            R_min, R_max = b0, b1
+        else:
+            # bounds are in log-return space r=log(R)
+            R_min, R_max = float(np.exp(b0)), float(np.exp(b1))
+
         if clip_trunc_to_support:
             R_min = max(R_min, float(R[0]))
             R_max = min(R_max, float(R[-1]))
+
         if not (np.isfinite(R_min) and np.isfinite(R_max) and R_max > R_min):
-            raise ValueError("Invalid r_bounds after clipping.")
+            raise ValueError("Invalid r_bounds after clipping to support.")
 
     kernel_yscale = str(kernel_yscale).lower().strip()
     if kernel_yscale not in {"linear", "log"}:
@@ -1259,88 +1362,100 @@ def P_Q_K_multipanel(
 
     ax2_list = []
 
+    # Precompute x-grid on full support (for cdf tail cut mapping to x, labels)
+    X_full = np.log(R) if x_space == "log" else R
+
     for k, j in enumerate(idxs):
         ax = axes[k]
         ax2 = ax.twinx()
         ax2_list.append(ax2)
 
-        # ---- base mask: rbounds applies to everything ----
+        # ---- base mask: rbounds applies to everything (in R-space) ----
         mask_all = np.isfinite(R)
         if use_rbounds:
             mask_all &= (R >= R_min) & (R <= R_max)
 
         R_all = R[mask_all]
-        q_plot = qR[j, :][mask_all]
-        p_plot = pR[j, :][mask_all]
-        M_plot = M[j, :][mask_all].copy()
+        X_all = (np.log(R_all) if x_space == "log" else R_all)
 
-        ax.plot(R_all, q_plot, label="q_R(R)", linewidth=1.8)
-        ax.plot(R_all, p_plot, label="p_R(R)", linewidth=1.8)
+        q_plot_R = qR[j, :][mask_all]
+        p_plot_R = pR[j, :][mask_all]
+        M_plot   = M[j,  :][mask_all].copy()
+
+        # ---- transform densities if plotting in log-return space ----
+        if x_space == "log":
+            q_plot = q_plot_R * R_all
+            p_plot = p_plot_R * R_all
+        else:
+            q_plot = q_plot_R
+            p_plot = p_plot_R
+
+        ax.plot(X_all, q_plot, label=("q_r(r)" if x_space == "log" else "q_R(R)"), linewidth=1.8)
+        ax.plot(X_all, p_plot, label=("p_r(r)" if x_space == "log" else "p_R(R)"), linewidth=1.8)
 
         # ---- optional two-sided CDF trunc for kernel only ----
-        kernel_label = "M(R)"
-        R_k = R_all
+        kernel_label = "M"
+        X_k = X_all
         M_k = M_plot
+
         if use_cdf:
-            # Compute p-CDF on full R (not rbounds-trimmed) so ptail_alpha means “global tails”
+            # Compute p-CDF on full R support (same measure as in R-space: ∫ p_R(R) dR)
             pj = np.maximum(np.asarray(pR[j, :], float), 0.0)
-    
+
             dR_full = np.diff(R)
             inc = 0.5 * (pj[1:] + pj[:-1]) * dR_full
-    
+
             cdf = np.empty_like(R)
             cdf[0] = 0.0
             cdf[1:] = np.cumsum(inc)
             total = float(cdf[-1])
-    
+
             if total > 0 and np.isfinite(total):
                 cdf /= total
-    
+
                 aL, aR = float(ptail_alpha[0]), float(ptail_alpha[1])
-    
+
                 # left cutoff: first index with CDF >= aL
                 if aL > 0:
                     idxL = np.where(cdf >= aL)[0]
                     iL = int(idxL[0]) if idxL.size else 0
                 else:
                     iL = 0
-    
+
                 # right cutoff: last index with CDF <= 1-aR
                 if aR > 0:
                     idxR = np.where(cdf <= (1.0 - aR))[0]
                     iR = int(idxR[-1]) if idxR.size else (R.size - 1)
                 else:
                     iR = R.size - 1
-    
+
                 if iR <= iL:
-                    R_k = np.array([], float)
+                    X_k = np.array([], float)
                     M_k = np.array([], float)
                 else:
                     R_left = float(R[iL])
                     R_right = float(R[iR])
-    
+
                     # intersect with rbounds-trimmed arrays:
-                    keep = (R_k >= R_left) & (R_k <= R_right)
-                    R_k = R_k[keep]
-                    M_k = M_k[keep]
-    
-                    kernel_label = f"M(R) (p-tails ≥ {aL:.0%}/{aR:.0%})"
+                    keep = (R_all >= R_left) & (R_all <= R_right)
+                    X_k = X_all[keep]
+                    M_k = M_plot[keep]
+
+                    kernel_label = f"M (p-tails ≥ {aL:.0%}/{aR:.0%})"
             else:
-                # if CDF invalid, suppress kernel for this slice
-                R_k = np.array([], float)
+                X_k = np.array([], float)
                 M_k = np.array([], float)
-        
 
         # ---- kernel y-scale adjustments ----
         if kernel_yscale == "log" and M_k.size > 0:
-            pos = np.isfinite(M_k) & (M_k > 0) & np.isfinite(R_k)
-            R_k = np.asarray(R_k, float)[pos]
+            pos = np.isfinite(M_k) & (M_k > 0) & np.isfinite(X_k)
+            X_k = np.asarray(X_k, float)[pos]
             M_k = np.asarray(M_k, float)[pos]
             M_k = np.maximum(M_k, kernel_log_eps)
 
-        if R_k.size > 0:
+        if X_k.size > 0:
             ax2.plot(
-                R_k, M_k,
+                X_k, M_k,
                 label=kernel_label + ("" if kernel_yscale == "linear" else " (log y)"),
                 color=kernel_color,
                 linestyle=kernel_linestyle,
@@ -1353,17 +1468,20 @@ def P_Q_K_multipanel(
         ax.set_title(f"T≈{T_days:.1f}d", fontsize=11)
 
         if (k % ncols) == 0:
-            ax.set_ylabel("Density (R-space)")
+            ax.set_ylabel("Density")
         if k >= (n_pan - ncols):
-            ax.set_xlabel("Gross return R")
+            ax.set_xlabel("log return r = ln(R)" if x_space == "log" else "Gross return R")
         if (k % ncols) == (ncols - 1):
-            ax2.set_ylabel("Pricing kernel M(R)")
+            ax2.set_ylabel("Pricing kernel M")
 
         ax.grid(True, alpha=0.25)
         ax2.set_yscale(kernel_yscale)
 
         if use_rbounds:
-            ax.set_xlim(R_min, R_max)
+            if x_space == "gross":
+                ax.set_xlim(R_min, R_max)
+            else:
+                ax.set_xlim(np.log(R_min), np.log(R_max))
 
     for k in range(n_pan, axes.size):
         axes[k].axis("off")
@@ -1374,7 +1492,7 @@ def P_Q_K_multipanel(
     labels = l1 + l2
 
     if title is None:
-        title = f"Date={out.get('anchor_key_used', 'N/A')}: q_R vs p_R with Pricing Kernel"
+        title = f"Date={out.get('anchor_key_used', 'N/A')}: q vs p with Pricing Kernel"
 
     fig.suptitle(title, y=0.995, fontsize=14)
     fig.legend(
@@ -1396,7 +1514,6 @@ def P_Q_K_multipanel(
 
     plt.show()
     return fig
-
 
 import os
 import numpy as np
@@ -1498,35 +1615,47 @@ def _normalize_pk_rows(
 
     raise ValueError("normalize must be one of {'none','anchor','eq_mean'}.")
 
-
 def pricing_kernel_surface_plot(
     out: dict,
     *,
     title: str = "Pricing Kernel Surface",
     cmap: str = "viridis",
-    save: str | None = None,          # .html for interactive; image ext for static
-    interactive: bool = True,
+    save: str | None = None,
+    dpi: int = 200,
+    interactive: bool = False,
     show: bool = True,
-    R_bounds: tuple[float, float] | None = None,
+    alpha: float = 0.9,
+    elev: float = 28,
+    azim: float = -60,
+    x_axis: str = "R",
+    x_bounds: tuple[float, float] | None = None,
     T_bounds: tuple[float, float] | None = None,
     zscale: Literal["linear", "log"] = "linear",
     normalize: Literal["none", "anchor", "eq_mean"] = "anchor",
     R0: float = 1.0,
+    ax=None,
+    add_colorbar: bool = True,
 ):
     """
-    Plot pricing kernel surface M(T,R) from an evaluation output dict `out`.
+    Plot pricing kernel surface from an evaluation output dict `out`.
+
+    x_axis:
+      "R" -> M(T,R), using out["anchor_surfaces"]["M_surface"] and out["R_common"]
+      "r" -> M(T,exp(r)), using out["anchor_surfaces"]["M_surface"] and log(out["R_common"])
+      "K" -> M(T,K/S0), using out["anchor_surfaces"]["M_surface"] and K = S0 * R
 
     Requires:
       out["R_common"], out["T_anchor"], out["anchor_surfaces"]["M_surface"].
     If normalize="eq_mean", also requires out["anchor_surfaces"]["qR_surface"].
 
-    Options:
-      - normalize:
-          * "none"   : no scaling
-          * "anchor" : divide each maturity row by M(R0) (default R0=1.0)
-          * "eq_mean": scale so ∫ M(R,T) q(R,T) dR = 1 for each row (per maturity)
-      - zscale="log": plots log(M) (only where M>0).
+    Returns
+    -------
+    fig, ax, surf     (static matplotlib case)
+    fig               (interactive plotly case)
     """
+    import numpy as np
+    from pathlib import Path
+
     if "anchor_surfaces" not in out:
         raise KeyError("Expected out['anchor_surfaces'].")
 
@@ -1541,88 +1670,155 @@ def pricing_kernel_surface_plot(
     if M.shape != (T.size, R.size):
         raise ValueError("M_surface must have shape (len(T_anchor), len(R_common)).")
 
-    # Optional row normalization (shape-preserving)
+    # ---- normalize rows first in R-space ----
     qR = None
     if normalize == "eq_mean":
         qR = np.asarray(anchor.get("qR_surface"), float)
+        if qR.shape != M.shape:
+            raise ValueError("qR_surface must have the same shape as M_surface.")
+
     M_norm = _normalize_pk_rows(M, R, mode=normalize, R0=R0, qR=qR)
 
-    # Bounds slice (applies to everything)
-    T_plot, R_plot, M_plot = _slice_bounds_2d(T, R, M_norm, T_bounds=T_bounds, R_bounds=R_bounds)
-    if T_plot.size < 2 or R_plot.size < 2:
+    # ---- choose x-axis representation ----
+    x_axis = str(x_axis).strip()
+    if x_axis not in {"R", "r", "K"}:
+        raise ValueError("x_axis must be one of {'R', 'r', 'K'}.")
+
+    if x_axis == "R":
+        X_grid = R.copy()
+        xlabel = "Gross return R"
+        zlab = "M(T,R)" if zscale == "linear" else "log M(T,R)"
+    elif x_axis == "r":
+        if np.any(R <= 0):
+            raise ValueError("R_common must be strictly positive to use x_axis='r'.")
+        X_grid = np.log(R)
+        xlabel = "Log return r = log(S_T/S0)"
+        zlab = "M(T,r)" if zscale == "linear" else "log M(T,r)"
+    else:  # "K"
+        meta = out.get("meta", {}) if isinstance(out.get("meta", {}), dict) else {}
+        S0 = (
+            out.get("S0", None)
+            or out.get("s0", None)
+            or meta.get("S0", None)
+            or meta.get("s0", None)
+        )
+        if S0 is None:
+            raise ValueError("S0 is required in `out` or out['meta'] to use x_axis='K'.")
+        S0 = float(S0)
+        X_grid = S0 * R
+        xlabel = "Strike K"
+        zlab = "M(T,K)" if zscale == "linear" else "log M(T,K)"
+
+    # ---- apply bounds in chosen x-space ----
+    T_plot, X_plot, M_plot = _slice_surface_bounds(
+        T,
+        X_grid,
+        M_norm,
+        T_bounds=T_bounds,
+        x_bounds=x_bounds,
+    )
+
+    if T_plot.size < 2 or X_plot.size < 2:
         raise ValueError("Not enough points to plot after bounds.")
 
-    # zscale
+    # ---- z-scale ----
     zscale = (zscale or "linear").lower().strip()
     if zscale not in {"linear", "log"}:
         raise ValueError("zscale must be 'linear' or 'log'.")
+
     if zscale == "log":
         Z = np.where(np.isfinite(M_plot) & (M_plot > 0), np.log(M_plot), np.nan)
-        zlab = "log M(T,R)"
     else:
         Z = M_plot
-        zlab = "M(T,R)"
 
-    # ---------- Plotly interactive ----------
+    X_mesh, T_mesh = np.meshgrid(X_plot, T_plot)
+
+    # =========================
+    # INTERACTIVE (Plotly)
+    # =========================
     if interactive:
         import plotly.graph_objects as go
 
-        R_mesh, T_mesh = np.meshgrid(R_plot, T_plot)
         fig = go.Figure(
-            data=[go.Surface(
-                x=R_mesh, y=T_mesh, z=Z,
-                colorscale=cmap,
-                colorbar=dict(title=zlab),
-            )]
+            data=[
+                go.Surface(
+                    x=X_mesh,
+                    y=T_mesh,
+                    z=Z,
+                    colorscale=cmap,
+                    colorbar=dict(title=zlab),
+                )
+            ]
         )
+
         fig.update_layout(
             title=title,
             scene=dict(
-                xaxis_title="Gross return R",
+                xaxis_title=xlabel,
                 yaxis_title="Maturity T (years)",
                 zaxis_title=zlab,
             ),
-            margin=dict(l=0, r=0, t=50, b=0),
+            margin=dict(l=0, r=0, t=55, b=0),
         )
 
         if save is not None:
-            save = str(save)
-            os.makedirs(os.path.dirname(save) or ".", exist_ok=True)
-            if save.lower().endswith(".html"):
+            save = Path(save)
+            save.parent.mkdir(parents=True, exist_ok=True)
+            if save.suffix.lower() == ".html":
                 fig.write_html(save)
-                print(f"[saved] {save}")
             else:
-                # Plotly image export needs kaleido
                 fig.write_image(save)
-                print(f"[saved] {save}")
+            print(f"[saved] {save}")
 
         if show:
             fig.show()
+
         return fig
 
-    # ---------- Matplotlib static ----------
-    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+    # =========================
+    # STATIC (Matplotlib)
+    # =========================
+    import matplotlib.pyplot as plt
 
-    RR, TT = np.meshgrid(R_plot, T_plot)
-    fig = plt.figure(figsize=(9.5, 6.5))
-    ax = fig.add_subplot(111, projection="3d")
+    created_fig = False
+    if ax is None:
+        fig = plt.figure(figsize=(10, 7))
+        ax = fig.add_subplot(111, projection="3d")
+        created_fig = True
+    else:
+        fig = ax.figure
 
-    surf = ax.plot_surface(RR, TT, Z, cmap=cmap, linewidth=0, antialiased=True)
-    ax.set_xlabel("Gross return R")
+    surf = ax.plot_surface(
+        X_mesh,
+        T_mesh,
+        Z,
+        cmap=cmap,
+        linewidth=0,
+        antialiased=True,
+        alpha=alpha,
+    )
+
+    if add_colorbar and created_fig:
+        fig.colorbar(surf, ax=ax, shrink=0.6, pad=0.08, label=zlab)
+
+    ax.set_xlabel(xlabel)
     ax.set_ylabel("Maturity T (years)")
     ax.set_zlabel(zlab)
     ax.set_title(title)
-    fig.colorbar(surf, ax=ax, shrink=0.65, pad=0.08, label=zlab)
+    ax.view_init(elev=elev, azim=azim)
 
-    plt.tight_layout()
+    if created_fig:
+        plt.tight_layout()
 
     if save is not None:
-        save = str(save)
-        os.makedirs(os.path.dirname(save) or ".", exist_ok=True)
-        fig.savefig(save, dpi=200, bbox_inches="tight")
+        save = Path(save)
+        save.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save, dpi=dpi, bbox_inches="tight")
         print(f"[saved] {save}")
 
-    if show:
+    if show and created_fig:
         plt.show()
+    elif created_fig and not show:
+        plt.close(fig)
 
-    return fig
+    return fig, ax, surf

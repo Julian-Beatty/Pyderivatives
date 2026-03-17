@@ -20,6 +20,8 @@ class MomentsConfig:
     renormalize: bool = True
     clip_negative: bool = True
     eps: float = 1e-30  # small floor to avoid divide-by-zero
+    bakshi: bool = False
+
 
 
 def _central_moments_from_density(x: np.ndarray, f: np.ndarray) -> Dict[str, float]:
