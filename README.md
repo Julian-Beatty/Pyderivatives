@@ -116,8 +116,6 @@ The package provides functionality for enforcing static no-arbitrage conditions 
   *Review of Financial Studies*, 6(2), 327–343.
 
 - **Black–Scholes model**
-![GLD](pyderivatives/Images/GLD_CallPanels_2022_08_08.png)
-![btc](pyderivatives/Images/btc_RNDPanels_2021_08_21.png)
 
 ---
 
