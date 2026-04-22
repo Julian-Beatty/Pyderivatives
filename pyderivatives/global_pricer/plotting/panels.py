@@ -5,6 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 from typing import Optional, Union, Literal
+import os
 
 
 # -------------------------
@@ -801,3 +802,217 @@ def delta_panels(
 
     plt.show()
     return fig
+
+
+def plot_overlay_rnd_lr_slices_subplots(
+    results_dict,
+    maturities=None,
+    maturity_indices=None,
+    n_select=5,
+    figsize=(10, 3),
+    main_title="Risk-Neutral Density Slices in Log-Return Space",
+    xlabel="Log return r = log(K/S0)",
+    ylabel="Density",
+    xlim=None,
+    ylim=None,
+    linewidth=2.0,
+    grid=True,
+    save_path=None,
+    dpi=300,
+    show=True,
+):
+    """
+    Plot one subplot per selected maturity, overlaying RND slices in log-return space
+    for multiple assets.
+
+    Parameters
+    ----------
+    results_dict : dict
+        Dictionary like:
+            {
+                "USO": USO_result_dict,
+                "UNG": UNG_result_dict
+            }
+
+        Each result dict should contain:
+            - 'rnd_lr_surface': array of shape (n_T, n_x)
+            - 'rnd_lr_grid': array of shape (n_x,)
+            - 'T_grid': array of shape (n_T,)
+
+    maturities : float or list of float, optional
+        Target maturities in years. Each requested maturity is matched to the
+        nearest available maturity in each asset's T_grid.
+
+        Example:
+            maturities=[14/365, 21/365]
+
+    maturity_indices : int or list of int, optional
+        Explicit maturity indices to use from the first asset in results_dict.
+        If provided, takes precedence over `maturities`.
+
+    n_select : int, default 5
+        If neither `maturities` nor `maturity_indices` is provided, choose this
+        many evenly spaced maturity slices based on the first asset.
+
+    figsize : tuple, default (10, 3)
+        Base figure size. Total height scales with number of panels.
+
+    main_title : str
+        Figure title.
+
+    xlabel, ylabel : str
+        Axis labels.
+
+    xlim, ylim : tuple, optional
+        Axis limits.
+
+    linewidth : float, default 2.0
+        Line width.
+
+    grid : bool, default True
+        Whether to show a grid.
+
+    save_path : str, optional
+        Full file path to save the figure.
+
+    dpi : int, default 300
+        Resolution for saved figure.
+
+    show : bool, default True
+        Whether to display the figure.
+
+    Returns
+    -------
+    fig, axes : matplotlib Figure and axes
+    """
+    if not results_dict:
+        raise ValueError("results_dict is empty.")
+
+    asset_names = list(results_dict.keys())
+    first_name = asset_names[0]
+    first_result = results_dict[first_name]
+
+    required_keys = ["rnd_lr_surface", "rnd_lr_grid", "T_grid"]
+    for key in required_keys:
+        if key not in first_result:
+            raise KeyError(f"First result dictionary is missing required key: '{key}'")
+
+    T_grid_ref = np.asarray(first_result["T_grid"])
+    x_ref = np.asarray(first_result["rnd_lr_grid"])
+    surface_ref = np.asarray(first_result["rnd_lr_surface"])
+
+    if surface_ref.shape[0] != len(T_grid_ref):
+        raise ValueError(
+            f"{first_name}: rnd_lr_surface rows must match length of T_grid."
+        )
+    if surface_ref.shape[1] != len(x_ref):
+        raise ValueError(
+            f"{first_name}: rnd_lr_surface columns must match length of rnd_lr_grid."
+        )
+
+    # Handle scalar inputs
+    if maturities is not None and np.isscalar(maturities):
+        maturities = [maturities]
+
+    if maturity_indices is not None and np.isscalar(maturity_indices):
+        maturity_indices = [maturity_indices]
+
+    # Select maturities
+    if maturity_indices is not None:
+        selected_idx = np.array(maturity_indices, dtype=int)
+    elif maturities is not None:
+        maturities = np.asarray(maturities, dtype=float)
+        selected_idx = np.array(
+            [np.argmin(np.abs(T_grid_ref - m)) for m in maturities],
+            dtype=int
+        )
+    else:
+        if n_select < 1:
+            raise ValueError("n_select must be at least 1.")
+        selected_idx = np.linspace(0, len(T_grid_ref) - 1, n_select, dtype=int)
+
+    # Remove duplicates while preserving order
+    selected_idx = np.array(list(dict.fromkeys(selected_idx.tolist())), dtype=int)
+
+    if np.any(selected_idx < 0) or np.any(selected_idx >= len(T_grid_ref)):
+        raise IndexError("One or more maturity indices are out of bounds.")
+
+    selected_T_ref = T_grid_ref[selected_idx]
+    n_panels = len(selected_T_ref)
+
+    fig, axes = plt.subplots(
+        n_panels,
+        1,
+        figsize=(figsize[0], figsize[1] * n_panels),
+        sharex=True
+    )
+
+    if n_panels == 1:
+        axes = [axes]
+
+    for p, T_target in enumerate(selected_T_ref):
+        ax = axes[p]
+
+        actual_Ts = []
+
+        for asset_name, res in results_dict.items():
+            for key in required_keys:
+                if key not in res:
+                    raise KeyError(
+                        f"Result dictionary for '{asset_name}' is missing required key: '{key}'"
+                    )
+
+            x = np.asarray(res["rnd_lr_grid"])
+            T_grid = np.asarray(res["T_grid"])
+            surface = np.asarray(res["rnd_lr_surface"])
+
+            if surface.shape[0] != len(T_grid):
+                raise ValueError(
+                    f"{asset_name}: rnd_lr_surface rows must match length of T_grid."
+                )
+            if surface.shape[1] != len(x):
+                raise ValueError(
+                    f"{asset_name}: rnd_lr_surface columns must match length of rnd_lr_grid."
+                )
+
+            idx = np.argmin(np.abs(T_grid - T_target))
+            T_actual = T_grid[idx]
+            actual_Ts.append(T_actual)
+
+            ax.plot(
+                x,
+                surface[idx, :],
+                linewidth=linewidth,
+                label=asset_name
+            )
+
+        ax.axvline(0.0, linestyle="--", linewidth=1.5, color="black", alpha=0.8)
+
+        # Use the reference maturity in title
+        ax.set_title(f"T ≈ {T_target:.6f} yr")
+        ax.set_ylabel(ylabel)
+
+        if xlim is not None:
+            ax.set_xlim(xlim)
+        if ylim is not None:
+            ax.set_ylim(ylim)
+        if grid:
+            ax.grid(True, alpha=0.3)
+
+        ax.legend()
+
+    axes[-1].set_xlabel(xlabel)
+    fig.suptitle(main_title, fontsize=16)
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+
+    if save_path is not None:
+        folder = os.path.dirname(save_path)
+        if folder:
+            os.makedirs(folder, exist_ok=True)
+        fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+
+    if show:
+        plt.show()
+
+    return fig, axes
+    

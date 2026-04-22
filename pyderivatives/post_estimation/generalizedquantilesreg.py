@@ -1393,8 +1393,7 @@ def run_asym_quantreg_with_controls(
         params = pd.DataFrame([params_dict[t] for t in taus_t], index=taus_t, columns=colnames)
         se_boot = pd.DataFrame([se_dict[t] for t in taus_t], index=taus_t, columns=colnames)
         t_boot = params / se_boot
-        p_boot_norm = t_boot.applymap(_pval_from_t_normal)
-
+        p_boot_norm = t_boot.map(_pval_from_t_normal)
         q_pseudo_r2: Dict[float, float] = {}
         q_prsquared: Dict[float, float] = {}
         for tau in taus_t:
