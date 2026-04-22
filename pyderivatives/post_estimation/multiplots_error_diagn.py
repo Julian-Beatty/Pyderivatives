@@ -200,53 +200,92 @@ def P_Q_K_multipanel_multi(
     panel_shape: Tuple[int, int] = (2, 4),
     save: Optional[Union[str, Path]] = None,
     dpi: int = 200,
+
+    # ----- x-axis controls -----
+    x_axis: str = "R",                             # {"R","logR"}
+
     # ----- truncation controls -----
     truncate: bool = True,
     ptail_alpha: Tuple[float, float] = (0.10, 0.0), # (alpha_left, alpha_right) for p-CDF tails
-    trunc_mode: str = "cdf",                        # {"cdf","rbounds","none","cdf+rbounds"}
-    r_bounds: Optional[Tuple[float, float]] = None,
+    trunc_mode: str = "cdf",                        # {"cdf","xbounds","none","cdf+xbounds"}
+    x_bounds: Optional[Tuple[float, float]] = None, # bounds in displayed x-axis coordinates
     clip_trunc_to_support: bool = True,
+
     # ----- kernel axis controls -----
     kernel_linestyle: str = "--",
     kernel_yscale: str = "linear",                  # {"linear","log"}
     kernel_log_eps: float = 1e-300,
+
     # ----- display controls -----
     legend_loc: str = "upper center",
     lw_density: float = 1.6,
     lw_kernel: float = 1.4,
     alpha_density: float = 0.95,
     alpha_kernel: float = 0.90,
+
     # labeling style
     show_model_in_label: bool = True,               # labels like "q_R (ModelA)"
 ):
     """
-    Multi-panel plot: q_R(R), p_R(R) and pricing kernel M(R) with dual y-axis,
-    OVERLAYED across multiple out dictionaries.
+    Multi-panel plot: q and p densities plus pricing kernel M with dual y-axis,
+    overlaid across multiple out dictionaries.
 
-    out_dict: {"label": out, ...}
+    Parameters
+    ----------
+    out_dict : dict
+        Dictionary like {"label": out, ...}
 
-    Assumed per-out structure:
-      out["anchor_surfaces"]["qR_surface"], ["pR_surface"], ["M_surface"] with shape (nT, nR)
-      out["T_anchor"] : (nT,)
-      out["R_common"] : (nR,)
+    Required per-out structure
+    --------------------------
+    out["anchor_surfaces"]["qR_surface"], ["pR_surface"], ["M_surface"] with shape (nT, nR)
+    out["T_anchor"] : (nT,)
+    out["R_common"] : (nR,)
+
+    x_axis
+    ------
+    "R"    : plot in gross return space
+    "logR" : plot in log-return space r = log(R)
+
+    Notes
+    -----
+    If x_axis="logR", densities are transformed by the Jacobian:
+        q_r(r) = q_R(R) * R
+        p_r(r) = p_R(R) * R
+    where R = exp(r). The pricing kernel M is not Jacobian-adjusted.
     """
 
+    # -------------------------
+    # basic validation
+    # -------------------------
     if not isinstance(out_dict, dict) or len(out_dict) == 0:
         raise ValueError("out_dict must be a non-empty dict like {'Model A': outA, ...}.")
 
-    # -------------------------
-    # parse truncation settings
-    # -------------------------
+    x_axis = str(x_axis).strip().lower()
+    if x_axis not in {"r", "logr"}:
+        if x_axis != "r_common" and x_axis != "gross" and x_axis != "return":
+            pass
+    if x_axis not in {"r", "logr", "r_common", "gross", "return", "rspace", "log-return", "log_return", "R".lower()}:
+        raise ValueError("x_axis must be either 'R' or 'logR'.")
+
+    use_log_x = x_axis in {"logr", "r_common", "rspace", "log-return", "log_return"}
+
+    # normalize display name
+    x_axis_name = "logR" if use_log_x else "R"
+
     mode = str(trunc_mode).lower().strip()
+    if mode == "rbounds":
+        mode = "xbounds"
+    if mode == "cdf+rbounds":
+        mode = "cdf+xbounds"
     if not truncate:
         mode = "none"
 
-    valid = {"none", "cdf", "rbounds", "cdf+rbounds"}
-    if mode not in valid:
-        raise ValueError(f"trunc_mode must be one of {valid}.")
+    valid_modes = {"none", "cdf", "xbounds", "cdf+xbounds"}
+    if mode not in valid_modes:
+        raise ValueError(f"trunc_mode must be one of {valid_modes}.")
 
-    use_cdf = mode in {"cdf", "cdf+rbounds"}
-    use_rbounds = mode in {"rbounds", "cdf+rbounds"}
+    use_cdf = mode in {"cdf", "cdf+xbounds"}
+    use_xbounds = mode in {"xbounds", "cdf+xbounds"}
 
     aL, aR = float(ptail_alpha[0]), float(ptail_alpha[1])
     if use_cdf:
@@ -258,38 +297,117 @@ def P_Q_K_multipanel_multi(
     kernel_yscale = str(kernel_yscale).lower().strip()
     if kernel_yscale not in {"linear", "log"}:
         raise ValueError("kernel_yscale must be one of {'linear','log'}.")
+
     kernel_log_eps = float(kernel_log_eps)
     if kernel_yscale == "log" and not (kernel_log_eps > 0):
         raise ValueError("kernel_log_eps must be > 0 for log scale.")
 
     # -------------------------
+    # helpers
+    # -------------------------
+    def _extract_transformed_surfaces(out):
+        """
+        Return (T, X, qX, pX, M) where X is either R or log(R),
+        and qX / pX are the correctly transformed densities for that x-axis.
+        """
+        if out is None or "anchor_surfaces" not in out:
+            raise KeyError("Each out dict must contain 'anchor_surfaces'.")
+
+        anchor = out["anchor_surfaces"]
+
+        T = np.asarray(out.get("T_anchor", []), float).ravel()
+        R = np.asarray(out.get("R_common", []), float).ravel()
+
+        qR = np.asarray(anchor.get("qR_surface", []), float)
+        pR = np.asarray(anchor.get("pR_surface", []), float)
+        M  = np.asarray(anchor.get("M_surface", []), float)
+
+        if T.size == 0 or R.size == 0:
+            raise ValueError("Missing T_anchor or R_common.")
+        if qR.shape != (T.size, R.size) or pR.shape != (T.size, R.size) or M.shape != (T.size, R.size):
+            raise ValueError("anchor_surfaces arrays do not match dimensions of T_anchor and R_common.")
+        if np.any(~np.isfinite(R)):
+            raise ValueError("R_common contains non-finite values.")
+        if R.size >= 2 and np.any(np.diff(R) <= 0):
+            raise ValueError("R_common must be strictly increasing.")
+        if use_log_x:
+            if np.any(R <= 0):
+                raise ValueError("All R_common values must be > 0 when x_axis='logR'.")
+            X = np.log(R)
+            jac = R[None, :]   # dR/dr = R
+            qX = qR * jac
+            pX = pR * jac
+        else:
+            X = R
+            qX = qR
+            pX = pR
+
+        return T, X, qX, pX, M
+
+    def _interp_to_ref(X_src, y_src, X_ref):
+        """Interpolate y(X_src) onto X_ref. Assumes X_src increasing."""
+        return np.interp(X_ref, X_src, y_src)
+
+    def _cdf_cutoffs(X_src, p_src, alpha_left, alpha_right):
+        """
+        Compute density-CDF cutoffs on the displayed x-axis support (X_src),
+        return (X_left, X_right) corresponding to alpha_left / 1-alpha_right.
+        """
+        px = np.maximum(np.asarray(p_src, float), 0.0)
+        if X_src.size < 2:
+            return None
+
+        dX = np.diff(X_src)
+        inc = 0.5 * (px[1:] + px[:-1]) * dX
+
+        cdf = np.empty_like(X_src)
+        cdf[0] = 0.0
+        cdf[1:] = np.cumsum(inc)
+
+        total = float(cdf[-1])
+        if not (np.isfinite(total) and total > 0):
+            return None
+
+        cdf /= total
+
+        # left cutoff
+        if alpha_left > 0:
+            idxL = np.where(cdf >= alpha_left)[0]
+            iL = int(idxL[0]) if idxL.size else 0
+        else:
+            iL = 0
+
+        # right cutoff
+        if alpha_right > 0:
+            idxR = np.where(cdf <= (1.0 - alpha_right))[0]
+            iR = int(idxR[-1]) if idxR.size else (X_src.size - 1)
+        else:
+            iR = X_src.size - 1
+
+        if iR <= iL:
+            return None
+
+        return float(X_src[iL]), float(X_src[iR])
+
+    # -------------------------
     # reference grids from first model
     # -------------------------
     first_label = next(iter(out_dict))
-    out0 = out_dict[first_label]
-    if out0 is None or "anchor_surfaces" not in out0:
-        raise KeyError(f"out_dict['{first_label}'] must contain out['anchor_surfaces'].")
+    T_ref, X_ref, q_ref0, p_ref0, M_ref0 = _extract_transformed_surfaces(out_dict[first_label])
 
-    anchor0 = out0["anchor_surfaces"]
-    T_ref = np.asarray(out0.get("T_anchor", []), float).ravel()
-    R_ref = np.asarray(out0.get("R_common", []), float).ravel()
+    # x-bounds range (if enabled) in displayed x coordinates
+    X_min = X_max = None
+    if use_xbounds:
+        if x_bounds is None or len(x_bounds) != 2:
+            raise ValueError("For xbounds truncation, provide x_bounds=(xmin, xmax).")
+        X_min, X_max = float(x_bounds[0]), float(x_bounds[1])
 
-    if T_ref.size == 0 or R_ref.size == 0:
-        raise ValueError("Missing T_anchor or R_common in the first out dict.")
-    if R_ref.size >= 2 and np.any(np.diff(R_ref) <= 0):
-        raise ValueError("R_common must be strictly increasing (reference model).")
-
-    # rbounds range (if enabled) in reference coordinates
-    R_min = R_max = None
-    if use_rbounds:
-        if r_bounds is None or len(r_bounds) != 2:
-            raise ValueError("For rbounds truncation, provide r_bounds=(R_min, R_max).")
-        R_min, R_max = float(r_bounds[0]), float(r_bounds[1])
         if clip_trunc_to_support:
-            R_min = max(R_min, float(R_ref[0]))
-            R_max = min(R_max, float(R_ref[-1]))
-        if not (np.isfinite(R_min) and np.isfinite(R_max) and R_max > R_min):
-            raise ValueError("Invalid r_bounds after clipping.")
+            X_min = max(X_min, float(X_ref[0]))
+            X_max = min(X_max, float(X_ref[-1]))
+
+        if not (np.isfinite(X_min) and np.isfinite(X_max) and X_max > X_min):
+            raise ValueError("Invalid x_bounds after clipping.")
 
     # -------------------------
     # choose maturities for panels
@@ -312,48 +430,6 @@ def P_Q_K_multipanel_multi(
     ax2_list = []
 
     # -------------------------
-    # helpers
-    # -------------------------
-    def _interp_to_ref(R_src, y_src):
-        """Interpolate y(R_src) onto R_ref. Assumes R_src increasing."""
-        return np.interp(R_ref, R_src, y_src)
-
-    def _pcdf_cutoffs(R_src, p_src):
-        """
-        Compute p-CDF cutoffs on the model's full support (R_src),
-        return (R_left, R_right) corresponding to alpha_left / 1-alpha_right.
-        """
-        pj = np.maximum(np.asarray(p_src, float), 0.0)
-        dR = np.diff(R_src)
-        inc = 0.5 * (pj[1:] + pj[:-1]) * dR
-        cdf = np.empty_like(R_src)
-        cdf[0] = 0.0
-        cdf[1:] = np.cumsum(inc)
-        total = float(cdf[-1])
-        if not (total > 0 and np.isfinite(total)):
-            return None
-
-        cdf /= total
-
-        # left cutoff
-        if aL > 0:
-            idxL = np.where(cdf >= aL)[0]
-            iL = int(idxL[0]) if idxL.size else 0
-        else:
-            iL = 0
-
-        # right cutoff
-        if aR > 0:
-            idxR = np.where(cdf <= (1.0 - aR))[0]
-            iR = int(idxR[-1]) if idxR.size else (R_src.size - 1)
-        else:
-            iR = R_src.size - 1
-
-        if iR <= iL:
-            return None
-        return float(R_src[iL]), float(R_src[iR])
-
-    # -------------------------
     # main plot loop
     # -------------------------
     for k, j in enumerate(idxs):
@@ -361,128 +437,131 @@ def P_Q_K_multipanel_multi(
         ax2 = ax.twinx()
         ax2_list.append(ax2)
 
-        # base mask on reference grid (rbounds applies to everything)
-        mask_all = np.isfinite(R_ref)
-        if use_rbounds:
-            mask_all &= (R_ref >= R_min) & (R_ref <= R_max)
+        # base mask on reference x grid
+        mask_all = np.isfinite(X_ref)
+        if use_xbounds:
+            mask_all &= (X_ref >= X_min) & (X_ref <= X_max)
 
-        R_all = R_ref[mask_all]
+        X_all = X_ref[mask_all]
 
         for model_label, out in out_dict.items():
-            if out is None or "anchor_surfaces" not in out:
-                continue
-
-            anchor = out["anchor_surfaces"]
-            T = np.asarray(out.get("T_anchor", []), float).ravel()
-            R = np.asarray(out.get("R_common", []), float).ravel()
-            qR = np.asarray(anchor.get("qR_surface", []), float)
-            pR = np.asarray(anchor.get("pR_surface", []), float)
-            M  = np.asarray(anchor.get("M_surface", []), float)
-
-            if T.size == 0 or R.size == 0:
-                continue
-            if qR.shape != (T.size, R.size) or pR.shape != (T.size, R.size) or M.shape != (T.size, R.size):
+            try:
+                T, X, qX, pX, M = _extract_transformed_surfaces(out)
+            except Exception:
                 continue
 
             # match maturity by nearest T to reference T_ref[j]
             jj = int(np.argmin(np.abs(T - T_ref[j])))
 
-            qj = qR[jj, :]
-            pj = pR[jj, :]
+            qj = qX[jj, :]
+            pj = pX[jj, :]
             Mj = M[jj, :]
 
-            # interpolate to reference R grid if needed
-            if R.shape != R_ref.shape or (R.size > 1 and not np.allclose(R, R_ref, atol=1e-12, rtol=1e-9)):
-                qj_ref = _interp_to_ref(R, qj)
-                pj_ref = _interp_to_ref(R, pj)
-                Mj_ref = _interp_to_ref(R, Mj)
+            # interpolate to reference X grid if needed
+            same_grid = (X.shape == X_ref.shape) and (
+                X.size <= 1 or np.allclose(X, X_ref, atol=1e-12, rtol=1e-9)
+            )
+
+            if not same_grid:
+                qj_ref = _interp_to_ref(X, qj, X_ref)
+                pj_ref = _interp_to_ref(X, pj, X_ref)
+                Mj_ref = _interp_to_ref(X, Mj, X_ref)
             else:
                 qj_ref, pj_ref, Mj_ref = qj, pj, Mj
 
-            # apply rbounds mask to q/p/M for plotting on left axis and for kernel base
+            # apply x-bounds mask to q/p/M for plotting
             q_plot = np.asarray(qj_ref, float)[mask_all]
             p_plot = np.asarray(pj_ref, float)[mask_all]
             M_plot = np.asarray(Mj_ref, float)[mask_all].copy()
 
-            qlab = "q_R(R)"
-            plab = "p_R(R)"
-            mlab = "M(R)"
+            # labels
+            if use_log_x:
+                qlab = "q_r(r)"
+                plab = "p_r(r)"
+                mlab = "M(r)"
+            else:
+                qlab = "q_R(R)"
+                plab = "p_R(R)"
+                mlab = "M(R)"
+
             if show_model_in_label:
                 qlab += f" ({model_label})"
                 plab += f" ({model_label})"
                 mlab += f" ({model_label})"
 
-            # --- plot densities and capture the model color (use q_R color as the model color) ---
+            # plot densities and capture model color
             (q_line,) = ax.plot(
-                R_all, q_plot,
+                X_all, q_plot,
                 linewidth=lw_density + 0.3,
                 alpha=alpha_density,
                 label=qlab,
             )
             model_color = q_line.get_color()
-            
+
             ax.plot(
-                R_all, p_plot,
+                X_all, p_plot,
                 linewidth=lw_density,
-                alpha=0.60,                  # <-- lighter
-                linestyle="-",               # same line, but subdued
+                alpha=0.60,
+                linestyle="-",
                 label=plab,
                 color=model_color,
             )
-                        
-            # ---- kernel truncation by p-CDF tails on FULL model support ----
-            R_k = R_all
+
+            # kernel truncation by p-CDF tails on FULL model support in displayed x-space
+            X_k = X_all
             M_k = M_plot
-            
+
             if use_cdf:
-                cut = _pcdf_cutoffs(R, pR[jj, :])  # model-native grid for tail cutoffs
+                cut = _cdf_cutoffs(X, pX[jj, :], aL, aR)
                 if cut is None:
-                    R_k = np.array([], float)
+                    X_k = np.array([], float)
                     M_k = np.array([], float)
                 else:
-                    R_left, R_right = cut
-                    keep = (R_k >= R_left) & (R_k <= R_right)
-                    R_k = R_k[keep]
+                    X_left, X_right = cut
+                    keep = (X_k >= X_left) & (X_k <= X_right)
+                    X_k = X_k[keep]
                     M_k = M_k[keep]
-                    if show_model_in_label:
-                        mlab = f"M(R) ({model_label}, p-tails ≥ {aL:.0%}/{aR:.0%})"
+
+                    if use_log_x:
+                        tail_text = f"p-tails ≥ {aL:.0%}/{aR:.0%}"
+                        mlab = f"M(r) ({model_label}, {tail_text})" if show_model_in_label else f"M(r) ({tail_text})"
                     else:
-                        mlab = f"M(R) (p-tails ≥ {aL:.0%}/{aR:.0%})"
-            
-            # log scale cleanup
+                        tail_text = f"p-tails ≥ {aL:.0%}/{aR:.0%}"
+                        mlab = f"M(R) ({model_label}, {tail_text})" if show_model_in_label else f"M(R) ({tail_text})"
+
+            # log-scale cleanup for kernel y-axis
             if kernel_yscale == "log" and M_k.size > 0:
-                pos = np.isfinite(M_k) & (M_k > 0) & np.isfinite(R_k)
-                R_k = np.asarray(R_k, float)[pos]
+                pos = np.isfinite(M_k) & (M_k > 0) & np.isfinite(X_k)
+                X_k = np.asarray(X_k, float)[pos]
                 M_k = np.asarray(M_k, float)[pos]
                 M_k = np.maximum(M_k, kernel_log_eps)
-            
-            if R_k.size > 0:
+
+            if X_k.size > 0:
                 ax2.plot(
-                    R_k, M_k,
+                    X_k, M_k,
                     label=mlab + ("" if kernel_yscale == "linear" else " (log y)"),
-                    linestyle=kernel_linestyle,     # dotted/dashed as you like
+                    linestyle=kernel_linestyle,
                     linewidth=lw_kernel,
                     alpha=alpha_kernel,
-                    color=model_color,              # <-- matches the model density color
+                    color=model_color,
                 )
-
 
         # panel title from reference maturity
         T_days = float(T_ref[j] * 365.0)
         ax.set_title(f"T≈{T_days:.1f}d", fontsize=11)
 
         if (k % ncols) == 0:
-            ax.set_ylabel("Density (R-space)")
+            ax.set_ylabel("Density")
         if k >= (n_pan - ncols):
-            ax.set_xlabel("Gross return R")
+            ax.set_xlabel("Log return r = log(R)" if use_log_x else "Gross return R")
         if (k % ncols) == (ncols - 1):
-            ax2.set_ylabel("Pricing kernel M(R)")
+            ax2.set_ylabel("Pricing kernel")
 
         ax.grid(True, alpha=0.25)
         ax2.set_yscale(kernel_yscale)
 
-        if use_rbounds:
-            ax.set_xlim(R_min, R_max)
+        if use_xbounds:
+            ax.set_xlim(X_min, X_max)
 
     # turn off unused axes
     for k in range(n_pan, axes.size):
@@ -490,13 +569,16 @@ def P_Q_K_multipanel_multi(
 
     # legend from first active axes
     handles, labels = [], []
-    for ax in [axes[0], ax2_list[0]]:
-        h, l = ax.get_legend_handles_labels()
+    for ax_ in [axes[0], ax2_list[0]]:
+        h, l = ax_.get_legend_handles_labels()
         handles.extend(h)
         labels.extend(l)
 
     if title is None:
-        title = "q_R vs p_R with Pricing Kernel (multi-model overlay)"
+        if use_log_x:
+            title = "q_r vs p_r with Pricing Kernel (multi-model overlay)"
+        else:
+            title = "q_R vs p_R with Pricing Kernel (multi-model overlay)"
 
     fig.suptitle(title, y=0.995, fontsize=14)
     fig.legend(
