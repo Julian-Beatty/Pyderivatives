@@ -19,6 +19,8 @@ dependencies = [
   "networkx",
   "pycwt",
   "statsmodels",
+  "pyarrow>=13",
+  "ecos",
 ]
 
 # ----------------------------------
