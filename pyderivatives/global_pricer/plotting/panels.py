@@ -1,337 +1,66 @@
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from pathlib import Path
+from typing import Literal, Optional, Union
+
 import numpy as np
 import matplotlib.pyplot as plt
-from pathlib import Path
-from typing import Optional, Union, Literal
-import os
 
-
-# -------------------------
-# small helpers (OK to keep)
-# -------------------------
-def _pick_panel_T_indices(T_grid: np.ndarray, n_panels: int) -> np.ndarray:
-    T_grid = np.asarray(T_grid, float).ravel()
-    n = T_grid.size
-    if n == 0:
-        return np.array([], dtype=int)
-    if n_panels <= 0:
-        return np.arange(n, dtype=int)
-
-    k = min(int(n_panels), n)
-    idx = np.unique(np.round(np.linspace(0, n - 1, k)).astype(int))
-    return idx
-
-
-def _make_panel_axes(n_panels: int, *, base_w: float = 4.5, base_h: float = 3.6) -> Tuple[plt.Figure, np.ndarray]:
-    """
-    Creates a near-square grid of subplots for n_panels panels.
-    Returns (fig, axes_flat).
-    """
-    n = int(n_panels)
-    ncols = int(np.ceil(np.sqrt(n)))
-    nrows = int(np.ceil(n / ncols))
-    fig, axes = plt.subplots(nrows, ncols, figsize=(base_w * ncols, base_h * nrows), squeeze=False)
-    return fig, axes.ravel()
 
 def _pick_panel_indices(T_grid: np.ndarray, n_panels: int) -> np.ndarray:
     T = np.asarray(T_grid, float).ravel()
-    n = int(max(1, n_panels))
     if T.size == 0:
         return np.array([], dtype=int)
-    if T.size <= n:
-        return np.arange(T.size, dtype=int)
-    idx = np.linspace(0, T.size - 1, n)
-    return np.unique(np.round(idx).astype(int))
+
+    n = min(max(int(n_panels), 1), T.size)
+    idx = np.unique(np.round(np.linspace(0, T.size - 1, n)).astype(int))
+    return idx
 
 
-# -------------------------
-# 1) Calls: observed vs fitted (your original)
-# -------------------------
-def call_panels(
-    res: dict,
+def _make_axes(
+    n_panels: int,
     *,
-    day,
-    n_panels: int = 6,
-    title: str = "Observed vs Fitted Curves",
-    date_str: Optional[str] = None,
-    spot: Optional[float] = None,
-    T_cluster_tol: float = 1.0 / 365.0,
-    legend_loc: str = "upper right",
+    panel_shape: Optional[tuple[int, int]] = None,
     figsize_per_panel: float = 2.2,
-    # ---- NEW ----
-    K_pad_frac: float = 0.05,          # 5% of observed strike range on each side
-    K_pad_abs: float = 0.0,            # optional absolute padding (same units as K)
-    save: Optional[Union[str, Path]] = None,
-    dpi: int = 200,
+    base_width: float = 8.5,
+    sharex: bool = True,
 ):
-    K_grid = np.asarray(res["K_grid"], float).ravel()
-    T_grid = np.asarray(res["T_grid"], float).ravel()
-    C_fit  = np.asarray(res["C_fit"], float)
-
-    if C_fit.shape != (T_grid.size, K_grid.size):
-        raise ValueError("res['C_fit'] must have shape (len(T_grid), len(K_grid)).")
-
-    # observed
-    K_obs = np.asarray(day.K_obs, float).ravel()
-    T_obs = np.asarray(day.T_obs, float).ravel()
-    C_obs = np.asarray(day.C_obs, float).ravel()
-    m = (
-        np.isfinite(K_obs) & np.isfinite(T_obs) & np.isfinite(C_obs)
-        & (K_obs > 0) & (T_obs >= 0) & (C_obs >= 0)
-    )
-    K_obs, T_obs, C_obs = K_obs[m], T_obs[m], C_obs[m]
-    if K_obs.size == 0:
-        raise ValueError("No valid observed quotes to plot.")
-
-    # shared x-range (observed)
-    Kmin_obs = float(np.nanmin(K_obs))
-    Kmax_obs = float(np.nanmax(K_obs))
-
-    # ---- NEW: padded plot window ----
-    obs_range = max(Kmax_obs - Kmin_obs, 1e-12)
-    pad = float(K_pad_abs) + float(K_pad_frac) * obs_range
-    Kmin_plot = Kmin_obs - pad
-    Kmax_plot = Kmax_obs + pad
-
-    # also clip to available fitted grid so mask isn't empty
-    Kmin_plot = max(Kmin_plot, float(np.nanmin(K_grid)))
-    Kmax_plot = min(Kmax_plot, float(np.nanmax(K_grid)))
-
-    # spot
-    if spot is None:
-        spot = res.get("s0", None) or getattr(day, "S0", None) or getattr(day, "spot", None)
-    spot = float(spot) if spot is not None else None
-
-    # ---- cluster observed maturities
-    T_sorted = np.sort(np.unique(T_obs))
-    clusters, cur = [], [T_sorted[0]]
-    for t in T_sorted[1:]:
-        if abs(t - cur[-1]) <= T_cluster_tol:
-            cur.append(t)
-        else:
-            clusters.append(float(np.mean(cur)))
-            cur = [t]
-    clusters.append(float(np.mean(cur)))
-    T_centers = np.array(clusters, float)
-
-    # pick panels
-    if T_centers.size <= n_panels:
-        T_panels = T_centers
-    else:
-        idx = np.unique(np.round(np.linspace(0, T_centers.size - 1, n_panels)).astype(int))
-        T_panels = T_centers[idx]
-
-    nrows = T_panels.size
-    fig_h = max(4.0, figsize_per_panel * nrows)
-    fig, axes = plt.subplots(nrows=nrows, ncols=1, figsize=(8.5, fig_h), sharex=True)
-    if nrows == 1:
-        axes = np.array([axes])
-
-    # ---- NEW: restrict fitted line to padded strike window (not observed window) ----
-    k_mask = (K_grid >= Kmin_plot) & (K_grid <= Kmax_plot)
-    K_grid_plot = K_grid[k_mask]
-    if K_grid_plot.size < 2:
-        raise ValueError("Padded strike window has too few points in K_grid to plot.")
-
-    for ax, T_panel in zip(axes, T_panels):
-        qmask = np.abs(T_obs - T_panel) <= T_cluster_tol
-        fit_idx = int(np.argmin(np.abs(T_grid - T_panel)))
-
-        if np.any(qmask):
-            ax.scatter(
-                K_obs[qmask], C_obs[qmask],
-                s=22, alpha=0.9, color="tab:blue", label="Observed"
-            )
-
-        ax.plot(
-            K_grid_plot, C_fit[fit_idx, k_mask],
-            linewidth=2.2, color="tab:blue", label="Global model (fit surface)"
-        )
-
-        if spot is not None:
-            ax.axvline(spot, linestyle="--", linewidth=1.5, color="black", label="Spot")
-
-        d = f"{date_str} " if date_str else ""
-        ax.set_title(f"{d}(T ≈ {T_panel:.5g} yr)")
-        ax.set_ylabel("Call price")
-        ax.grid(True, alpha=0.25)
-        ax.legend(loc=legend_loc)
-
-        # ---- NEW: xlim uses padded window ----
-        ax.set_xlim(Kmin_plot, Kmax_plot)
-
-    axes[-1].set_xlabel("Strike K")
-    fig.suptitle(title)
-    fig.tight_layout()
-
-    if save is not None:
-        save = Path(save)
-        save.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(save, dpi=dpi, bbox_inches="tight")
-        print(f"[saved] {save}")
-
-    plt.show()
-    return fig
-
-
-
-import numpy as np
-import matplotlib.pyplot as plt
-from typing import Optional
-
-import numpy as np
-import matplotlib.pyplot as plt
-from typing import Optional
-
-
-
-# -------------------------
-# 2) IV panels
-# -------------------------
-def iv_panels(
-    res: dict,
-    *,
-    n_panels: int = 6,
-    title: str = "IV Panels",
-    # ---- layout ----
-    panel_shape: tuple[int, int] | None = None,   # e.g. (3,2); default keeps old behavior
-    save: str | None = None,
-    dpi: int = 300,
-    show: bool = True,
-    # ---- NEW: x-axis / bounds ----
-    x_axis: str = "K",                            # {"K","R","r"} strike / gross return / log return
-    x_bounds: tuple[float, float] | None = None,  # bounds in chosen x-axis units
-    spot: float | None = None,                    # S0; required for x_axis in {"R","r"} unless in res
-):
-    """
-    Panel plots of IV across maturities.
-
-    Requires:
-      res["iv_surface"] OR res["vol_surface"]
-      res["K_grid"], res["T_grid"]
-
-    x_axis:
-      "K": x = K (strike)
-      "R": x = R = K/S0 (gross return / moneyness)
-      "r": x = r = log(K/S0) (log return)
-
-    x_bounds are applied in the chosen x units.
-
-    Note: For x_axis in {"R","r"} spot/S0 must be available (passed or in res).
-    """
-    import numpy as np
-    import matplotlib.pyplot as plt
-    from pathlib import Path
-
-    # ---- load surface ----
-    if "iv_surface" in res:
-        iv = np.asarray(res["iv_surface"], float)
-    elif "vol_surface" in res:
-        iv = np.asarray(res["vol_surface"], float)
-    else:
-        raise KeyError("Missing iv surface. Expected res['iv_surface'] or res['vol_surface'].")
-
-    K_grid = np.asarray(res["K_grid"], float).ravel()
-    T_grid = np.asarray(res["T_grid"], float).ravel()
-
-    if iv.shape != (T_grid.size, K_grid.size):
-        raise ValueError("IV surface must have shape (len(T_grid), len(K_grid)).")
-
-    # ---- spot/S0 ----
-    if spot is None:
-        spot = res.get("S0", None) or res.get("s0", None)
-    spot = float(spot) if spot is not None else None
-
-    x_axis = str(x_axis).strip()
-    if x_axis not in {"K", "R", "r"}:
-        raise ValueError("x_axis must be one of {'K','R','r'}.")
-
-    if x_axis in {"R", "r"} and spot is None:
-        raise ValueError("spot/S0 is required when x_axis is 'R' or 'r'.")
-
-    # -------------------------
-    # pick maturities
-    # -------------------------
-    idxT = _pick_panel_T_indices(T_grid, n_panels)
-    n_panels_actual = int(idxT.size)
-
-    # -------------------------
-    # NEW: x-mask from bounds
-    # -------------------------
-    if x_bounds is None:
-        k_mask = np.isfinite(K_grid)
-    else:
-        lo, hi = float(x_bounds[0]), float(x_bounds[1])
-        if lo >= hi:
-            raise ValueError("x_bounds must be (lo, hi) with lo < hi.")
-
-        if x_axis == "K":
-            k_mask = (K_grid >= lo) & (K_grid <= hi)
-        elif x_axis == "R":
-            k_mask = (K_grid >= lo * spot) & (K_grid <= hi * spot)
-        else:  # x_axis == "r"
-            k_mask = (K_grid >= spot * np.exp(lo)) & (K_grid <= spot * np.exp(hi))
-
-    if not np.any(k_mask):
-        raise ValueError("x_bounds produced an empty plotting window on K_grid.")
-
-    K_plot = K_grid[k_mask]
-
-    # ---- x for plotting ----
-    if x_axis == "K":
-        x_plot = K_plot
-        xlabel = "Strike K"
-    elif x_axis == "R":
-        x_plot = K_plot / spot
-        xlabel = "Gross return R = K/S0"
-    else:
-        x_plot = np.log(K_plot / spot)
-        xlabel = "Log return r = log(K/S0)"
-
-    # -------------------------
-    # panel layout
-    # -------------------------
     if panel_shape is None:
-        # original behavior
-        fig, axes = _make_panel_axes(n_panels_actual)
-        axes = np.atleast_1d(axes)
+        nrows, ncols = n_panels, 1
     else:
         nrows, ncols = int(panel_shape[0]), int(panel_shape[1])
-        if nrows * ncols < n_panels_actual:
+        if nrows * ncols < n_panels:
             raise ValueError(
-                f"panel_shape={panel_shape} has {nrows*ncols} slots, but need {n_panels_actual}."
+                f"panel_shape={panel_shape} has {nrows * ncols} slots, "
+                f"but need {n_panels}."
             )
 
-        fig_h = max(4.0, 2.2 * nrows)
-        fig_w = 8.5 * ncols
-        fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(fig_w, fig_h), sharex=True)
-        axes = np.atleast_1d(axes).ravel()
+    fig_w = base_width * ncols
+    fig_h = max(4.0, figsize_per_panel * nrows)
 
-    # -------------------------
-    # plot
-    # -------------------------
-    for ax, j in zip(axes[:n_panels_actual], idxT):
-        ax.plot(x_plot, iv[j, k_mask], linewidth=2.0)
-        ax.set_title(f"T = {float(T_grid[j]):.4g}")
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel("Implied vol")
-        ax.grid(True, alpha=0.25)
+    fig, axes = plt.subplots(
+        nrows=nrows,
+        ncols=ncols,
+        figsize=(fig_w, fig_h),
+        sharex=sharex,
+    )
 
-        # x-limits in chosen units
-        ax.set_xlim(float(x_plot.min()), float(x_plot.max()))
+    axes = np.atleast_1d(axes).ravel()
+    return fig, axes, nrows, ncols
 
-    # Turn off unused panels
-    for ax in axes[n_panels_actual:]:
-        ax.axis("off")
 
-    fig.suptitle(title)
-    fig.tight_layout(rect=[0, 0, 1, 0.95])
-
+def _save_show(
+    fig,
+    *,
+    save: Optional[Union[str, Path]] = None,
+    dpi: int = 200,
+    show: bool = True,
+):
     if save is not None:
         save = Path(save)
         save.parent.mkdir(parents=True, exist_ok=True)
+        if save.suffix == "":
+            save = save.with_suffix(".png")
         fig.savefig(save, dpi=dpi, bbox_inches="tight")
         print(f"[saved] {save}")
 
@@ -343,250 +72,254 @@ def iv_panels(
     return fig
 
 
+def _get_grid(res: dict, x_axis: Literal["k", "lr", "r"]) -> np.ndarray:
+    key = {
+        "k": "grid_k",
+        "lr": "grid_lr",
+        "r": "grid_r",
+    }[x_axis]
+
+    if key not in res:
+        raise KeyError(f"Missing required grid: res['{key}'].")
+
+    return np.asarray(res[key], float).ravel()
 
 
+def _get_rnd_surface(res: dict, x_axis: Literal["k", "lr", "r"]) -> np.ndarray:
+    key = {
+        "k": "rnd_k_surface",
+        "lr": "rnd_lr_surface",
+        "r": "rnd_r_surface",
+    }[x_axis]
 
-# -------------------------
-# 3) RND panels
-# -------------------------
-import numpy as np
-import matplotlib.pyplot as plt
-from typing import Optional, Union
-from pathlib import Path
-import numpy as np
-import matplotlib.pyplot as plt
-from pathlib import Path
-from typing import Optional, Union
+    if key not in res:
+        raise KeyError(f"Missing required RND surface: res['{key}'].")
 
-import numpy as np
-import matplotlib.pyplot as plt
-from pathlib import Path
-from typing import Optional, Union
+    return np.asarray(res[key], float)
 
-def rnd_panels(
+
+def _axis_labels(x_axis: Literal["k", "lr", "r"]) -> tuple[str, str]:
+    if x_axis == "k":
+        return "Strike K", r"$q_K(K)$"
+    if x_axis == "lr":
+        return "Log return lr = log(K/S0)", r"$q_{lr}(lr)$"
+    if x_axis == "r":
+        return "Gross return R = K/S0", r"$q_R(R)$"
+    raise ValueError("x_axis must be one of {'k', 'lr', 'r'}.")
+
+
+def _x_mask(x: np.ndarray, x_bounds: Optional[tuple[float, float]]) -> np.ndarray:
+    x = np.asarray(x, float).ravel()
+
+    if x_bounds is None:
+        mask = np.isfinite(x)
+    else:
+        lo, hi = map(float, x_bounds)
+        if lo >= hi:
+            raise ValueError("x_bounds must satisfy lo < hi.")
+        mask = np.isfinite(x) & (x >= lo) & (x <= hi)
+
+    if not np.any(mask):
+        raise ValueError("x_bounds produced an empty plotting window.")
+
+    return mask
+
+
+def call_panels(
     res: dict,
     *,
+    day,
     n_panels: int = 6,
-    title: str = "RND Panels",
+    title: str = "Observed vs Fitted Curves",
     date_str: Optional[str] = None,
-    day: Optional[object] = None,
-    xlim_obs: bool = True,
     spot: Optional[float] = None,
-    show_spot: bool = True,
-    spot_label: str = "Spot",
-    # --- layout ---
-    panel_shape: tuple[int, int] | None = None,   # e.g. (3,2); default => stacked (n,1)
-    save: Optional[Union[str, Path]] = None,
-    dpi: int = 200,
+    T_cluster_tol: float = 1.0 / 365.0,
     legend_loc: str = "upper right",
     figsize_per_panel: float = 2.2,
-    # ---- x-axis / bounds ----
-    x_axis: str = "K",                            # {"K","R","r"}
-    x_bounds: tuple[float, float] | None = None,  # bounds in chosen x_axis units
-    # ---- percentile markers ----
-    pct_lower: Optional[float] = None,            # e.g. 1 or 0.01
-    pct_upper: Optional[float] = None,            # e.g. 99 or 0.99
-    mark_percentiles: bool = True,
-    pct_line_style: str = ":",
-    pct_line_width: float = 2.0,
-    pct_lower_label: Optional[str] = None,        # override legend label if desired
-    pct_upper_label: Optional[str] = None,        # override legend label if desired
+    K_pad_frac: float = 0.05,
+    K_pad_abs: float = 0.0,
+    save: Optional[Union[str, Path]] = None,
+    dpi: int = 200,
+    show: bool = True,
 ):
-    """
-    Plot RND panels with optional x-axis transform and optional percentile markers.
-
-    x_axis="K": x = K (strike)
-    x_axis="R": x = R = K / S0 (gross return / moneyness)
-    x_axis="r": x = r = log(K / S0) (log return)
-
-    Percentiles:
-    - Computed from q(K|T) on the (masked) K-grid window via numerical CDF inversion.
-    - Legend labels include the percentile AND the corresponding strike, e.g. "p99-K6000".
-    """
-
-    def _to_prob(p: Optional[float]) -> Optional[float]:
-        if p is None:
-            return None
-        p = float(p)
-        if p > 1.0:
-            p = p / 100.0
-        if not (0.0 < p < 1.0):
-            raise ValueError("Percentiles must be in (0,1) or (0,100).")
-        return p
-
-    def _quantile_from_pdf(K: np.ndarray, pdf: np.ndarray, qprob: float) -> float:
-        pdf = np.clip(np.asarray(pdf, float), 0.0, np.inf)
-        area = np.trapezoid(pdf, K)  # NumPy 2.x safe
-        if not np.isfinite(area) or area <= 0:
-            return np.nan
-        pdf = pdf / area
-        cdf = np.concatenate([
-            [0.0],
-            np.cumsum((pdf[1:] + pdf[:-1]) * 0.5 * np.diff(K))
-        ])
-        cdf = np.clip(cdf, 0.0, 1.0)
-        return float(np.interp(qprob, cdf, K))
-
-    def _fmtK(Kq: float) -> str:
-        # strike formatting for legend labels
-        if not np.isfinite(Kq):
-            return "nan"
-        if abs(Kq) >= 100:
-            return f"{Kq:.0f}"
-        return f"{Kq:.4g}"
-
-    if "rnd_surface" not in res:
-        raise KeyError("Missing RND. Expected res['rnd_surface'].")
-
-    qsurf = np.asarray(res["rnd_surface"], float)
-    K_grid = np.asarray(res["K_grid"], float).ravel()
+    K_grid = np.asarray(res["grid_k"], float).ravel()
     T_grid = np.asarray(res["T_grid"], float).ravel()
+    C_fit = np.asarray(res["C_fit"], float)
 
-    if qsurf.shape != (T_grid.size, K_grid.size):
-        raise ValueError("RND surface must have shape (len(T_grid), len(K_grid)).")
-    if K_grid.size < 3:
-        raise ValueError("K_grid too small to plot meaningfully.")
-
-    # ----- resolve spot -----
-    if spot is None:
-        spot = (
-            res.get("S0", None)
-            or res.get("s0", None)
-            or getattr(day, "S0", None)
-            or getattr(day, "spot", None)
+    if C_fit.shape != (T_grid.size, K_grid.size):
+        raise ValueError(
+            f"C_fit has shape {C_fit.shape}, expected {(T_grid.size, K_grid.size)}."
         )
+
+    K_obs = np.asarray(day.K_obs, float).ravel()
+    T_obs = np.asarray(day.T_obs, float).ravel()
+    C_obs = np.asarray(day.C_obs, float).ravel()
+
+    valid = (
+        np.isfinite(K_obs)
+        & np.isfinite(T_obs)
+        & np.isfinite(C_obs)
+        & (K_obs > 0)
+        & (T_obs >= 0)
+        & (C_obs >= 0)
+    )
+
+    K_obs, T_obs, C_obs = K_obs[valid], T_obs[valid], C_obs[valid]
+
+    if K_obs.size == 0:
+        raise ValueError("No valid observed quotes to plot.")
+
+    Kmin_obs = float(np.nanmin(K_obs))
+    Kmax_obs = float(np.nanmax(K_obs))
+    obs_range = max(Kmax_obs - Kmin_obs, 1e-12)
+
+    pad = float(K_pad_abs) + float(K_pad_frac) * obs_range
+
+    Kmin_plot = max(Kmin_obs - pad, float(np.nanmin(K_grid)))
+    Kmax_plot = min(Kmax_obs + pad, float(np.nanmax(K_grid)))
+
+    k_mask = (K_grid >= Kmin_plot) & (K_grid <= Kmax_plot)
+
+    if np.sum(k_mask) < 2:
+        raise ValueError("Strike window has too few grid points to plot.")
+
+    if spot is None:
+        spot = res.get("S0", None) or getattr(day, "S0", None) or getattr(day, "spot", None)
+
     spot = float(spot) if spot is not None else None
 
-    x_axis = str(x_axis).strip()
-    if x_axis not in {"K", "R", "r"}:
-        raise ValueError("x_axis must be one of {'K','R','r'}.")
-    if x_axis in {"R", "r"} and spot is None:
-        raise ValueError("spot/S0 is required when x_axis is 'R' or 'r'.")
+    T_sorted = np.sort(np.unique(T_obs))
 
-    # ----- percentiles requested? -----
-    qL = _to_prob(pct_lower)
-    qU = _to_prob(pct_upper)
-    want_pct = bool(mark_percentiles) and ((qL is not None) or (qU is not None))
+    clusters = []
+    cur = [T_sorted[0]]
 
-    # ----- choose maturities -----
-    n_pan = int(min(max(n_panels, 1), T_grid.size))
-    idxT = np.unique(np.round(np.linspace(0, T_grid.size - 1, n_pan)).astype(int))
-    n_panels_actual = int(idxT.size)
-
-    # ----- determine default K-window (from observed strikes if requested) -----
-    if (day is not None) and xlim_obs:
-        K_obs = np.asarray(getattr(day, "K_obs"), float).ravel()
-        K_obs = K_obs[np.isfinite(K_obs) & (K_obs > 0)]
-        if K_obs.size > 0:
-            Kmin0, Kmax0 = float(np.nanmin(K_obs)), float(np.nanmax(K_obs))
+    for t in T_sorted[1:]:
+        if abs(t - cur[-1]) <= T_cluster_tol:
+            cur.append(t)
         else:
-            Kmin0, Kmax0 = float(K_grid.min()), float(K_grid.max())
+            clusters.append(float(np.mean(cur)))
+            cur = [t]
+
+    clusters.append(float(np.mean(cur)))
+    T_centers = np.asarray(clusters, float)
+
+    if T_centers.size <= n_panels:
+        T_panels = T_centers
     else:
-        Kmin0, Kmax0 = float(K_grid.min()), float(K_grid.max())
+        idx = np.unique(np.round(np.linspace(0, T_centers.size - 1, n_panels)).astype(int))
+        T_panels = T_centers[idx]
 
-    # ----- map bounds in chosen axis back to a K-mask -----
-    if x_bounds is None:
-        k_mask = (K_grid >= Kmin0) & (K_grid <= Kmax0)
-    else:
-        lo, hi = float(x_bounds[0]), float(x_bounds[1])
-        if lo >= hi:
-            raise ValueError("x_bounds must be (lo, hi) with lo < hi.")
-
-        if x_axis == "K":
-            k_mask = (K_grid >= lo) & (K_grid <= hi)
-        elif x_axis == "R":
-            k_mask = (K_grid >= lo * spot) & (K_grid <= hi * spot)
-        else:  # x_axis == "r"
-            k_mask = (K_grid >= spot * np.exp(lo)) & (K_grid <= spot * np.exp(hi))
-
-    if not np.any(k_mask):
-        raise ValueError("x_bounds produced an empty plotting window on K_grid.")
+    fig, axes, nrows, ncols = _make_axes(
+        len(T_panels),
+        panel_shape=None,
+        figsize_per_panel=figsize_per_panel,
+        sharex=True,
+    )
 
     K_plot = K_grid[k_mask]
 
-    # ----- compute x for plotting -----
-    if x_axis == "K":
-        x_plot = K_plot
-        xlabel = "Strike K"
-        show_spot_line = bool(show_spot) and (spot is not None)
-        spot_line_x = spot if spot is not None else None
-    elif x_axis == "R":
-        x_plot = K_plot / spot
-        xlabel = "Gross return R = K/S0"
-        show_spot_line = bool(show_spot)
-        spot_line_x = 1.0
-    else:  # x_axis == "r"
-        x_plot = np.log(K_plot / spot)
-        xlabel = "Log return r = log(K/S0)"
-        show_spot_line = bool(show_spot)
-        spot_line_x = 0.0
+    for ax, T_panel in zip(axes[: len(T_panels)], T_panels):
+        qmask = np.abs(T_obs - T_panel) <= T_cluster_tol
+        fit_idx = int(np.argmin(np.abs(T_grid - T_panel)))
 
-    if show_spot_line and spot_line_x is not None:
-        show_spot_line = (x_plot.min() <= spot_line_x <= x_plot.max())
+        if np.any(qmask):
+            ax.scatter(
+                K_obs[qmask],
+                C_obs[qmask],
+                s=22,
+                alpha=0.9,
+                label="Observed",
+            )
 
-    # ----- panel shape -----
-    if panel_shape is None:
-        nrows, ncols = n_panels_actual, 1
-    else:
-        nrows, ncols = int(panel_shape[0]), int(panel_shape[1])
-        if nrows * ncols < n_panels_actual:
-            raise ValueError(f"panel_shape={panel_shape} has {nrows*ncols} slots, but need {n_panels_actual}.")
+        ax.plot(
+            K_plot,
+            C_fit[fit_idx, k_mask],
+            linewidth=2.2,
+            label="Global model",
+        )
 
-    fig_h = max(4.0, figsize_per_panel * nrows)
-    fig_w = 8.5 if ncols == 1 else 8.5 * ncols / 1.0
-    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(fig_w, fig_h), sharex=True)
-    axes = np.atleast_1d(axes).ravel()
-
-    # helper: map strike quantile to axis units
-    def _K_to_x(Kq: float) -> float:
-        if x_axis == "K":
-            return Kq
-        if x_axis == "R":
-            return Kq / spot
-        return float(np.log(Kq / spot))
-
-    # ----- plot -----
-    for ax, j in zip(axes[:n_panels_actual], idxT):
-        ax.plot(x_plot, qsurf[j, k_mask], linewidth=2.2, color="tab:blue", label="RND")
-
-        if show_spot_line:
-            ax.axvline(spot_line_x, linestyle="--", linewidth=1.5, color="black", label=spot_label)
-
-        # ---- percentile markers ----
-        if want_pct:
-            pdf_row = qsurf[j, k_mask]  # use the plotted window
-
-            if qL is not None:
-                KqL = _quantile_from_pdf(K_plot, pdf_row, qL)
-                if np.isfinite(KqL):
-                    xL = _K_to_x(KqL)
-                    default_lblL = f"p{int(round(qL*100))}-K{_fmtK(KqL)}"
-                    lblL = pct_lower_label or default_lblL
-                    ax.axvline(xL, linestyle=pct_line_style, linewidth=pct_line_width,
-                               color="tab:red", label=lblL)
-
-            if qU is not None:
-                KqU = _quantile_from_pdf(K_plot, pdf_row, qU)
-                if np.isfinite(KqU):
-                    xU = _K_to_x(KqU)
-                    default_lblU = f"p{int(round(qU*100))}-K{_fmtK(KqU)}"
-                    lblU = pct_upper_label or default_lblU
-                    ax.axvline(xU, linestyle=pct_line_style, linewidth=pct_line_width,
-                               color="tab:green", label=lblU)
+        if spot is not None and Kmin_plot <= spot <= Kmax_plot:
+            ax.axvline(spot, linestyle="--", linewidth=1.5, label="Spot")
 
         d = f"{date_str} " if date_str else ""
-        ax.set_title(f"{d}(T = {float(T_grid[j]):.5g} yr)")
-        ax.set_ylabel("q(K|T)")
+        ax.set_title(f"{d}T ≈ {T_panel:.5g} yr")
+        ax.set_ylabel("Call price")
         ax.grid(True, alpha=0.25)
         ax.legend(loc=legend_loc)
+        ax.set_xlim(Kmin_plot, Kmax_plot)
 
-        ax.set_xlim(float(x_plot.min()), float(x_plot.max()))
+    axes[len(T_panels) - 1].set_xlabel("Strike K")
 
-    # turn off unused axes
-    for ax in axes[n_panels_actual:]:
+    fig.suptitle(title)
+    fig.tight_layout()
+
+    return _save_show(fig, save=save, dpi=dpi, show=show)
+
+
+def iv_panels(
+    res: dict,
+    *,
+    n_panels: int = 6,
+    title: str = "IV Panels",
+    x_axis: Literal["k", "lr", "r"] = "k",
+    x_bounds: Optional[tuple[float, float]] = None,
+    panel_shape: Optional[tuple[int, int]] = None,
+    save: Optional[Union[str, Path]] = None,
+    dpi: int = 300,
+    show: bool = True,
+    figsize_per_panel: float = 2.2,
+):
+    if "iv_surface" not in res:
+        raise KeyError("Missing IV surface. Expected res['iv_surface'].")
+
+    iv = np.asarray(res["iv_surface"], float)
+    T_grid = np.asarray(res["T_grid"], float).ravel()
+
+    if x_axis == "k":
+        x = np.asarray(res["grid_k"], float).ravel()
+    elif x_axis == "lr":
+        x = np.asarray(res["grid_lr"], float).ravel()
+    elif x_axis == "r":
+        x = np.asarray(res["grid_r"], float).ravel()
+    else:
+        raise ValueError("x_axis must be one of {'k', 'lr', 'r'}.")
+
+    if iv.shape != (T_grid.size, x.size):
+        raise ValueError(f"iv_surface has shape {iv.shape}, expected {(T_grid.size, x.size)}.")
+
+    xmask = _x_mask(x, x_bounds)
+    x_plot = x[xmask]
+
+    idxT = _pick_panel_indices(T_grid, n_panels)
+    n_actual = len(idxT)
+
+    fig, axes, nrows, ncols = _make_axes(
+        n_actual,
+        panel_shape=panel_shape,
+        figsize_per_panel=figsize_per_panel,
+        sharex=True,
+    )
+
+    xlabel = {
+        "k": "Strike K",
+        "lr": "Log return lr = log(K/S0)",
+        "r": "Gross return R = K/S0",
+    }[x_axis]
+
+    for ax, j in zip(axes[:n_actual], idxT):
+        ax.plot(x_plot, iv[j, xmask], linewidth=2.0)
+        ax.set_title(f"T = {float(T_grid[j]):.5g} yr")
+        ax.set_ylabel("Implied vol")
+        ax.grid(True, alpha=0.25)
+
+        if x_axis == "lr" and x_plot.min() <= 0 <= x_plot.max():
+            ax.axvline(0.0, linestyle="--", linewidth=1.3)
+        elif x_axis == "r" and x_plot.min() <= 1 <= x_plot.max():
+            ax.axvline(1.0, linestyle="--", linewidth=1.3)
+
+    for ax in axes[n_actual:]:
         ax.axis("off")
 
-    # x-label on bottom row
     for ax in axes[(nrows - 1) * ncols : nrows * ncols]:
         if ax.has_data():
             ax.set_xlabel(xlabel)
@@ -594,14 +327,155 @@ def rnd_panels(
     fig.suptitle(title)
     fig.tight_layout()
 
-    if save is not None:
-        save = Path(save)
-        save.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(save, dpi=dpi, bbox_inches="tight")
-        print(f"[saved] {save}")
+    return _save_show(fig, save=save, dpi=dpi, show=show)
 
-    plt.show()
-    return fig
+
+def rnd_panels(
+    res: dict,
+    *,
+    x_axis: Literal["k", "lr", "r"] = "k",
+    n_panels: int = 6,
+    title: str = "RND Panels",
+    date_str: Optional[str] = None,
+    x_bounds: Optional[tuple[float, float]] = None,
+    panel_shape: Optional[tuple[int, int]] = None,
+    save: Optional[Union[str, Path]] = None,
+    dpi: int = 200,
+    show: bool = True,
+    legend_loc: str = "upper right",
+    figsize_per_panel: float = 2.2,
+    show_spot: bool = True,
+
+    # ---- ADD THESE BACK ----
+    pct_lower: Optional[float] = None,
+    pct_upper: Optional[float] = None,
+    mark_percentiles: bool = True,
+    pct_line_style: str = ":",
+    pct_line_width: float = 2.0,
+):
+    def _to_prob(p):
+        if p is None:
+            return None
+
+        p = float(p)
+
+        if p > 1.0:
+            p = p / 100.0
+
+        if not (0.0 < p < 1.0):
+            raise ValueError("Percentiles must be in (0,1) or (0,100).")
+
+        return p
+
+
+    def _quantile_from_pdf(xv, pdf, qprob):
+        pdf = np.clip(np.asarray(pdf, float), 0.0, np.inf)
+
+        area = np.trapezoid(pdf, xv)
+
+        if not np.isfinite(area) or area <= 0:
+            return np.nan
+
+        pdf = pdf / area
+
+        cdf = np.concatenate([
+            [0.0],
+            np.cumsum((pdf[1:] + pdf[:-1]) * 0.5 * np.diff(xv))
+        ])
+
+        cdf = np.clip(cdf, 0.0, 1.0)
+
+        return float(np.interp(qprob, cdf, xv))
+    x_axis = str(x_axis).lower()
+
+    x = _get_grid(res, x_axis)
+    qsurf = _get_rnd_surface(res, x_axis)
+    T_grid = np.asarray(res["T_grid"], float).ravel()
+
+    if qsurf.shape != (T_grid.size, x.size):
+        raise ValueError(f"RND surface has shape {qsurf.shape}, expected {(T_grid.size, x.size)}.")
+
+    xmask = _x_mask(x, x_bounds)
+    x_plot = x[xmask]
+
+    idxT = _pick_panel_indices(T_grid, n_panels)
+    n_actual = len(idxT)
+
+    fig, axes, nrows, ncols = _make_axes(
+        n_actual,
+        panel_shape=panel_shape,
+        figsize_per_panel=figsize_per_panel,
+        sharex=True,
+    )
+
+    xlabel, ylabel = _axis_labels(x_axis)
+    qL = _to_prob(pct_lower)
+    qU = _to_prob(pct_upper)
+    
+    want_pct = (
+        bool(mark_percentiles)
+        and ((qL is not None) or (qU is not None))
+    )
+
+    for ax, j in zip(axes[:n_actual], idxT):
+        ax.plot(x_plot, qsurf[j, xmask], linewidth=2.2, label="RND")
+        if want_pct:
+
+            pdf_row = qsurf[j, xmask]
+
+            if qL is not None:
+                xL = _quantile_from_pdf(x_plot, pdf_row, qL)
+
+                if np.isfinite(xL):
+                    ax.axvline(
+                        xL,
+                        linestyle=pct_line_style,
+                        linewidth=pct_line_width,
+                        color="tab:red",
+                        label=f"p{int(round(qL * 100))}",
+                    )
+
+            if qU is not None:
+                xU = _quantile_from_pdf(x_plot, pdf_row, qU)
+
+                if np.isfinite(xU):
+                    ax.axvline(
+                        xU,
+                        linestyle=pct_line_style,
+                        linewidth=pct_line_width,
+                        color="tab:green",
+                        label=f"p{int(round(qU * 100))}",
+                    )
+
+        if show_spot:
+            if x_axis == "lr" and x_plot.min() <= 0 <= x_plot.max():
+                ax.axvline(0.0, linestyle="--", linewidth=1.3, label="Spot")
+            elif x_axis == "r" and x_plot.min() <= 1 <= x_plot.max():
+                ax.axvline(1.0, linestyle="--", linewidth=1.3, label="Spot")
+            elif x_axis == "k":
+                spot = res.get("S0", None)
+                if spot is not None:
+                    spot = float(spot)
+                    if x_plot.min() <= spot <= x_plot.max():
+                        ax.axvline(spot, linestyle="--", linewidth=1.3, label="Spot")
+
+        d = f"{date_str} " if date_str else ""
+        ax.set_title(f"{d}T = {float(T_grid[j]):.5g} yr")
+        ax.set_ylabel(ylabel)
+        ax.grid(True, alpha=0.25)
+        ax.legend(loc=legend_loc)
+
+    for ax in axes[n_actual:]:
+        ax.axis("off")
+
+    for ax in axes[(nrows - 1) * ncols : nrows * ncols]:
+        if ax.has_data():
+            ax.set_xlabel(xlabel)
+
+    fig.suptitle(title)
+    fig.tight_layout()
+
+    return _save_show(fig, save=save, dpi=dpi, show=show)
 
 
 def cdf_panels(
@@ -610,85 +484,60 @@ def cdf_panels(
     n_panels: int = 6,
     title: str = "CDF Panels",
     date_str: Optional[str] = None,
-    day: Optional[object] = None,
-    xlim_obs: bool = True,
-    # ---- NEW ----
-    panel_shape: tuple[int, int] | None = None,   # e.g. (3,2); default => stacked (n,1)
+    x_bounds: Optional[tuple[float, float]] = None,
+    panel_shape: Optional[tuple[int, int]] = None,
     save: Optional[Union[str, Path]] = None,
     dpi: int = 200,
+    show: bool = True,
     legend_loc: str = "upper right",
     figsize_per_panel: float = 2.2,
 ):
-    if "cdf_surface" not in res:
-        raise KeyError("Missing CDF. Expected res['cdf_surface'].")
+    if "rnd_cdf_surface" not in res:
+        raise KeyError("Missing CDF. Expected res['rnd_cdf_surface'].")
 
-    F = np.asarray(res["cdf_surface"], float)
-    K_grid = np.asarray(res["K_grid"], float).ravel()
+    F = np.asarray(res["rnd_cdf_surface"], float)
+    K_grid = np.asarray(res["grid_k"], float).ravel()
     T_grid = np.asarray(res["T_grid"], float).ravel()
 
     if F.shape != (T_grid.size, K_grid.size):
-        raise ValueError("CDF surface must have shape (len(T_grid), len(K_grid)).")
-    if K_grid.size < 3:
-        raise ValueError("K_grid too small to plot meaningfully.")
+        raise ValueError(f"CDF surface has shape {F.shape}, expected {(T_grid.size, K_grid.size)}.")
 
-    n_pan = int(min(max(n_panels, 1), T_grid.size))
-    idxT = np.unique(np.round(np.linspace(0, T_grid.size - 1, n_pan)).astype(int))
-
-    if (day is not None) and xlim_obs:
-        K_obs = np.asarray(getattr(day, "K_obs"), float).ravel()
-        K_obs = K_obs[np.isfinite(K_obs) & (K_obs > 0)]
-        if K_obs.size > 0:
-            Kmin, Kmax = float(np.nanmin(K_obs)), float(np.nanmax(K_obs))
-        else:
-            Kmin, Kmax = float(K_grid.min()), float(K_grid.max())
-    else:
-        Kmin, Kmax = float(K_grid.min()), float(K_grid.max())
-
-    k_mask = (K_grid >= Kmin) & (K_grid <= Kmax)
+    k_mask = _x_mask(K_grid, x_bounds)
     K_plot = K_grid[k_mask]
 
-    n_panels_actual = int(idxT.size)
+    idxT = _pick_panel_indices(T_grid, n_panels)
+    n_actual = len(idxT)
 
-    if panel_shape is None:
-        nrows, ncols = n_panels_actual, 1
-    else:
-        nrows, ncols = int(panel_shape[0]), int(panel_shape[1])
-        if nrows * ncols < n_panels_actual:
-            raise ValueError(f"panel_shape={panel_shape} has {nrows*ncols} slots, but need {n_panels_actual}.")
+    fig, axes, nrows, ncols = _make_axes(
+        n_actual,
+        panel_shape=panel_shape,
+        figsize_per_panel=figsize_per_panel,
+        sharex=True,
+    )
 
-    fig_h = max(4.0, figsize_per_panel * nrows)
-    fig_w = 8.5 if ncols == 1 else 8.5 * ncols / 1.0
-    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(fig_w, fig_h), sharex=True)
-    axes = np.atleast_1d(axes).ravel()
+    for ax, j in zip(axes[:n_actual], idxT):
+        ax.plot(K_plot, F[j, k_mask], linewidth=2.2, label="CDF")
 
-    for ax, j in zip(axes[:n_panels_actual], idxT):
-        ax.plot(K_plot, F[j, k_mask], linewidth=2.2, color="tab:blue", label="CDF")
         d = f"{date_str} " if date_str else ""
-        ax.set_title(f"{d}(T = {float(T_grid[j]):.5g} yr)")
+        ax.set_title(f"{d}T = {float(T_grid[j]):.5g} yr")
         ax.set_ylabel("CDF")
-        ax.grid(True, alpha=0.25)
         ax.set_ylim(-0.02, 1.02)
+        ax.grid(True, alpha=0.25)
         ax.legend(loc=legend_loc)
-        ax.set_xlim(Kmin, Kmax)
 
-    for ax in axes[n_panels_actual:]:
+    for ax in axes[n_actual:]:
         ax.axis("off")
 
-    for ax in axes[(nrows-1)*ncols : nrows*ncols]:
+    for ax in axes[(nrows - 1) * ncols : nrows * ncols]:
         if ax.has_data():
             ax.set_xlabel("Strike K")
 
     fig.suptitle(title)
     fig.tight_layout()
 
-    if save is not None:
-        save = Path(save)
-        save.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(save, dpi=dpi, bbox_inches="tight")
-        print(f"[saved] {save}")
+    return _save_show(fig, save=save, dpi=dpi, show=show)
 
-    plt.show()
-    return fig
+
 def delta_panels(
     res: dict,
     *,
@@ -699,33 +548,31 @@ def delta_panels(
     spot: Optional[float] = None,
     legend_loc: str = "upper right",
     figsize_per_panel: float = 2.2,
-    # ---- NEW ----
-    panel_shape: tuple[int, int] | None = None,   # e.g. (3,2); default => stacked (n,1)
+    panel_shape: Optional[tuple[int, int]] = None,
     save: Optional[Union[str, Path]] = None,
     dpi: int = 200,
+    show: bool = True,
 ):
     if "delta_dict" not in res or res["delta_dict"] is None:
         raise KeyError("Missing delta_dict. Expected res['delta_dict'].")
 
     d = res["delta_dict"]
+
     delta = np.asarray(d["delta_axis"], float).ravel()
     T = np.asarray(d["T_axis"], float).ravel()
 
     if which == "call":
         Z_key = "iv_delta_call"
-        ylab = "IV (call delta)"
-        line_label = "IV call"
-        line_color = "black"
+        ylabel = "IV (call delta)"
+        label = "IV call"
     elif which == "put":
         Z_key = "iv_delta_put_abs"
-        ylab = "IV (|put delta|)"
-        line_label = "IV put"
-        line_color = "black"
+        ylabel = "IV (|put delta|)"
+        label = "IV put"
     elif which == "skew":
         Z_key = "delta_skew_surface"
-        ylab = "Normalized Delta skew"
-        line_label = "Skew"
-        line_color = "black"
+        ylabel = "Normalized delta skew"
+        label = "Skew"
     else:
         raise ValueError("which must be one of {'skew', 'call', 'put'}.")
 
@@ -733,13 +580,14 @@ def delta_panels(
         raise KeyError(f"delta_dict is missing '{Z_key}'.")
 
     Z = np.asarray(d[Z_key], float)
-    if Z.shape != (T.size, delta.size):
-        raise ValueError(f"Surface {Z_key} has shape {Z.shape} but expected {(T.size, delta.size)}.")
 
-    row_ok = np.array([np.any(np.isfinite(Z[i, :])) for i in range(T.size)], dtype=bool)
-    valid_rows = np.where(row_ok)[0]
+    if Z.shape != (T.size, delta.size):
+        raise ValueError(f"{Z_key} has shape {Z.shape}, expected {(T.size, delta.size)}.")
+
+    valid_rows = np.where(np.any(np.isfinite(Z), axis=1))[0]
+
     if valid_rows.size == 0:
-        raise ValueError("No finite rows to plot in the requested surface.")
+        raise ValueError("No finite rows to plot.")
 
     if valid_rows.size <= n_panels:
         idxT = valid_rows
@@ -747,194 +595,124 @@ def delta_panels(
         idx = np.unique(np.round(np.linspace(0, valid_rows.size - 1, n_panels)).astype(int))
         idxT = valid_rows[idx]
 
-    n_panels_actual = int(idxT.size)
+    n_actual = len(idxT)
 
-    if panel_shape is None:
-        nrows, ncols = n_panels_actual, 1
-    else:
-        nrows, ncols = int(panel_shape[0]), int(panel_shape[1])
-        if nrows * ncols < n_panels_actual:
-            raise ValueError(f"panel_shape={panel_shape} has {nrows*ncols} slots, but need {n_panels_actual}.")
-
-    fig_h = max(4.0, figsize_per_panel * nrows)
-    fig_w = 8.5 if ncols == 1 else 8.5 * ncols / 1.0
-    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(fig_w, fig_h), sharex=True)
-    axes = np.atleast_1d(axes).ravel()
+    fig, axes, nrows, ncols = _make_axes(
+        n_actual,
+        panel_shape=panel_shape,
+        figsize_per_panel=figsize_per_panel,
+        sharex=True,
+    )
 
     spot_delta = float(spot) if spot is not None else None
 
-    for ax, j in zip(axes[:n_panels_actual], idxT):
+    for ax, j in zip(axes[:n_actual], idxT):
         y = Z[j, :]
-        m = np.isfinite(delta) & np.isfinite(y)
-        if np.sum(m) < 2:
-            ax.text(0.5, 0.5, "No data", transform=ax.transAxes, ha="center", va="center")
+        mask = np.isfinite(delta) & np.isfinite(y)
+
+        if np.sum(mask) < 2:
+            ax.text(
+                0.5,
+                0.5,
+                "No data",
+                transform=ax.transAxes,
+                ha="center",
+                va="center",
+            )
             ax.grid(True, alpha=0.25)
             continue
 
-        ax.plot(delta[m], y[m], linewidth=2.2, color=line_color, label=line_label)
+        ax.plot(delta[mask], y[mask], linewidth=2.2, label=label)
 
         if spot_delta is not None:
-            ax.axvline(spot_delta, linestyle="--", linewidth=1.5, color="black", label="Spot delta")
+            ax.axvline(spot_delta, linestyle="--", linewidth=1.5, label="Spot delta")
 
         dstr = f"{date_str} " if date_str else ""
         ax.set_title(f"{dstr}T = {float(T[j]):.5g} yr")
-        ax.set_ylabel(ylab)
+        ax.set_ylabel(ylabel)
         ax.grid(True, alpha=0.25)
         ax.legend(loc=legend_loc)
 
-    for ax in axes[n_panels_actual:]:
+    for ax in axes[n_actual:]:
         ax.axis("off")
 
-    for ax in axes[(nrows-1)*ncols : nrows*ncols]:
+    for ax in axes[(nrows - 1) * ncols : nrows * ncols]:
         if ax.has_data():
             ax.set_xlabel("Delta")
 
     fig.suptitle(title)
     fig.tight_layout()
 
-    if save is not None:
-        save = Path(save)
-        save.parent.mkdir(parents=True, exist_ok=True)
-        if save.suffix == "":
-            save = save.with_suffix(".png")
-        fig.savefig(save, dpi=dpi, bbox_inches="tight")
-        print(f"[saved] {save}")
-
-    plt.show()
-    return fig
+    return _save_show(fig, save=save, dpi=dpi, show=show)
 
 
 def plot_overlay_rnd_lr_slices_subplots(
-    results_dict,
+    results_dict: dict,
     maturities=None,
     maturity_indices=None,
-    n_select=5,
-    figsize=(10, 3),
-    main_title="Risk-Neutral Density Slices in Log-Return Space",
-    xlabel="Log return r = log(K/S0)",
-    ylabel="Density",
-    xlim=None,
-    ylim=None,
-    linewidth=2.0,
-    grid=True,
-    save_path=None,
-    dpi=300,
-    show=True,
+    n_select: int = 5,
+    figsize: tuple[float, float] = (10, 3),
+    main_title: str = "Risk-Neutral Density Slices in Log-Return Space",
+    xlabel: str = "Log return lr = log(K/S0)",
+    ylabel: str = "Density",
+    xlim: Optional[tuple[float, float]] = None,
+    ylim: Optional[tuple[float, float]] = None,
+    linewidth: float = 2.0,
+    grid: bool = True,
+    save_path: Optional[Union[str, Path]] = None,
+    dpi: int = 300,
+    show: bool = True,
 ):
-    """
-    Plot one subplot per selected maturity, overlaying RND slices in log-return space
-    for multiple assets.
-
-    Parameters
-    ----------
-    results_dict : dict
-        Dictionary like:
-            {
-                "USO": USO_result_dict,
-                "UNG": UNG_result_dict
-            }
-
-        Each result dict should contain:
-            - 'rnd_lr_surface': array of shape (n_T, n_x)
-            - 'rnd_lr_grid': array of shape (n_x,)
-            - 'T_grid': array of shape (n_T,)
-
-    maturities : float or list of float, optional
-        Target maturities in years. Each requested maturity is matched to the
-        nearest available maturity in each asset's T_grid.
-
-        Example:
-            maturities=[14/365, 21/365]
-
-    maturity_indices : int or list of int, optional
-        Explicit maturity indices to use from the first asset in results_dict.
-        If provided, takes precedence over `maturities`.
-
-    n_select : int, default 5
-        If neither `maturities` nor `maturity_indices` is provided, choose this
-        many evenly spaced maturity slices based on the first asset.
-
-    figsize : tuple, default (10, 3)
-        Base figure size. Total height scales with number of panels.
-
-    main_title : str
-        Figure title.
-
-    xlabel, ylabel : str
-        Axis labels.
-
-    xlim, ylim : tuple, optional
-        Axis limits.
-
-    linewidth : float, default 2.0
-        Line width.
-
-    grid : bool, default True
-        Whether to show a grid.
-
-    save_path : str, optional
-        Full file path to save the figure.
-
-    dpi : int, default 300
-        Resolution for saved figure.
-
-    show : bool, default True
-        Whether to display the figure.
-
-    Returns
-    -------
-    fig, axes : matplotlib Figure and axes
-    """
     if not results_dict:
         raise ValueError("results_dict is empty.")
+
+    required_keys = ["rnd_lr_surface", "grid_lr", "T_grid"]
 
     asset_names = list(results_dict.keys())
     first_name = asset_names[0]
     first_result = results_dict[first_name]
 
-    required_keys = ["rnd_lr_surface", "rnd_lr_grid", "T_grid"]
     for key in required_keys:
         if key not in first_result:
-            raise KeyError(f"First result dictionary is missing required key: '{key}'")
+            raise KeyError(f"{first_name} is missing required key: '{key}'.")
 
-    T_grid_ref = np.asarray(first_result["T_grid"])
-    x_ref = np.asarray(first_result["rnd_lr_grid"])
-    surface_ref = np.asarray(first_result["rnd_lr_surface"])
+    T_grid_ref = np.asarray(first_result["T_grid"], float).ravel()
+    x_ref = np.asarray(first_result["grid_lr"], float).ravel()
+    surface_ref = np.asarray(first_result["rnd_lr_surface"], float)
 
-    if surface_ref.shape[0] != len(T_grid_ref):
+    if surface_ref.shape != (T_grid_ref.size, x_ref.size):
         raise ValueError(
-            f"{first_name}: rnd_lr_surface rows must match length of T_grid."
-        )
-    if surface_ref.shape[1] != len(x_ref):
-        raise ValueError(
-            f"{first_name}: rnd_lr_surface columns must match length of rnd_lr_grid."
+            f"{first_name}: rnd_lr_surface has shape {surface_ref.shape}, "
+            f"expected {(T_grid_ref.size, x_ref.size)}."
         )
 
-    # Handle scalar inputs
     if maturities is not None and np.isscalar(maturities):
         maturities = [maturities]
 
     if maturity_indices is not None and np.isscalar(maturity_indices):
         maturity_indices = [maturity_indices]
 
-    # Select maturities
     if maturity_indices is not None:
-        selected_idx = np.array(maturity_indices, dtype=int)
+        selected_idx = np.asarray(maturity_indices, dtype=int)
     elif maturities is not None:
-        maturities = np.asarray(maturities, dtype=float)
-        selected_idx = np.array(
+        maturities = np.asarray(maturities, float)
+        selected_idx = np.asarray(
             [np.argmin(np.abs(T_grid_ref - m)) for m in maturities],
-            dtype=int
+            dtype=int,
         )
     else:
         if n_select < 1:
             raise ValueError("n_select must be at least 1.")
-        selected_idx = np.linspace(0, len(T_grid_ref) - 1, n_select, dtype=int)
+        selected_idx = np.linspace(
+            0,
+            T_grid_ref.size - 1,
+            min(n_select, T_grid_ref.size),
+            dtype=int,
+        )
 
-    # Remove duplicates while preserving order
-    selected_idx = np.array(list(dict.fromkeys(selected_idx.tolist())), dtype=int)
+    selected_idx = np.asarray(list(dict.fromkeys(selected_idx.tolist())), dtype=int)
 
-    if np.any(selected_idx < 0) or np.any(selected_idx >= len(T_grid_ref)):
+    if np.any(selected_idx < 0) or np.any(selected_idx >= T_grid_ref.size):
         raise IndexError("One or more maturity indices are out of bounds.")
 
     selected_T_ref = T_grid_ref[selected_idx]
@@ -944,75 +722,68 @@ def plot_overlay_rnd_lr_slices_subplots(
         n_panels,
         1,
         figsize=(figsize[0], figsize[1] * n_panels),
-        sharex=True
+        sharex=True,
     )
 
-    if n_panels == 1:
-        axes = [axes]
+    axes = np.atleast_1d(axes).ravel()
 
     for p, T_target in enumerate(selected_T_ref):
         ax = axes[p]
 
-        actual_Ts = []
-
         for asset_name, res in results_dict.items():
             for key in required_keys:
                 if key not in res:
-                    raise KeyError(
-                        f"Result dictionary for '{asset_name}' is missing required key: '{key}'"
-                    )
+                    raise KeyError(f"{asset_name} is missing required key: '{key}'.")
 
-            x = np.asarray(res["rnd_lr_grid"])
-            T_grid = np.asarray(res["T_grid"])
-            surface = np.asarray(res["rnd_lr_surface"])
+            x = np.asarray(res["grid_lr"], float).ravel()
+            T_grid = np.asarray(res["T_grid"], float).ravel()
+            surface = np.asarray(res["rnd_lr_surface"], float)
 
-            if surface.shape[0] != len(T_grid):
+            if surface.shape != (T_grid.size, x.size):
                 raise ValueError(
-                    f"{asset_name}: rnd_lr_surface rows must match length of T_grid."
-                )
-            if surface.shape[1] != len(x):
-                raise ValueError(
-                    f"{asset_name}: rnd_lr_surface columns must match length of rnd_lr_grid."
+                    f"{asset_name}: rnd_lr_surface has shape {surface.shape}, "
+                    f"expected {(T_grid.size, x.size)}."
                 )
 
-            idx = np.argmin(np.abs(T_grid - T_target))
-            T_actual = T_grid[idx]
-            actual_Ts.append(T_actual)
+            idx = int(np.argmin(np.abs(T_grid - T_target)))
 
             ax.plot(
                 x,
                 surface[idx, :],
                 linewidth=linewidth,
-                label=asset_name
+                label=f"{asset_name} T={T_grid[idx]:.5g}",
             )
 
-        ax.axvline(0.0, linestyle="--", linewidth=1.5, color="black", alpha=0.8)
+        if xlim is None or (xlim[0] <= 0.0 <= xlim[1]):
+            ax.axvline(0.0, linestyle="--", linewidth=1.5)
 
-        # Use the reference maturity in title
         ax.set_title(f"T ≈ {T_target:.6f} yr")
         ax.set_ylabel(ylabel)
 
         if xlim is not None:
             ax.set_xlim(xlim)
+
         if ylim is not None:
             ax.set_ylim(ylim)
+
         if grid:
             ax.grid(True, alpha=0.3)
 
         ax.legend()
 
     axes[-1].set_xlabel(xlabel)
+
     fig.suptitle(main_title, fontsize=16)
     fig.tight_layout(rect=[0, 0, 1, 0.97])
 
     if save_path is not None:
-        folder = os.path.dirname(save_path)
-        if folder:
-            os.makedirs(folder, exist_ok=True)
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
 
     if show:
         plt.show()
+    else:
+        plt.close(fig)
 
     return fig, axes
-    

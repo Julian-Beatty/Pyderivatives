@@ -230,7 +230,7 @@ class GlobalSurfacePricer:
         
             "ticker": getattr(day, "ticker", "Unknown"),   # <-- ADD THIS LINE
         
-            "K_grid": K_grid,
+            "grid_k": K_grid,
             "T_grid": T_grid,
             "C_fit": np.asarray(C_fit, float),
             "meta": dict(self.state_.fit_meta),
@@ -242,84 +242,98 @@ class GlobalSurfacePricer:
         if compute_rnd:
             rnd_raw = breeden_litzenberger_pdf(
                 out["C_fit"],
-                K_grid=K_grid,
+                K_grid=out["grid_k"],
                 T_grid=T_grid,
                 r=float(day.r),
                 floor=1e-12,
             )
-
+        
             cfg = safety_clip if safety_clip is not None else SafetyClipConfig(enabled=False)
+        
             rnd_clip, clip_info = apply_safety_clip_surface(
                 rnd_raw,
-                K_grid=K_grid,
+                K_grid=out["grid_k"],
                 S0=float(day.S0),
                 cfg=cfg,
             )
-
-            out["rnd_surface"] = np.asarray(rnd_clip, float)  # PRIMARY (clipped)
+        
+            out["rnd_k_surface"] = np.asarray(rnd_clip, float)
+        
             out["safety_clip"] = {
                 "enabled": bool(cfg.enabled),
                 "any_used": bool(any(d.get("used", False) for d in clip_info)),
                 "per_row": clip_info,
             }
-            
-            # --- log-return RND surface (same rows as T_grid) ---
-            r_grid, rnd_lr = strike_rnd_to_return_density(
-                out["rnd_surface"],      # use clipped surface
-                K_grid=K_grid,
+        
+            out["grid_lr"], out["rnd_lr_surface"] = strike_rnd_to_return_density(
+                out["rnd_k_surface"],
+                K_grid=out["grid_k"],
                 S0=float(day.S0),
                 return_type="log",
                 normalize=True,
             )
-
-            out["rnd_lr_grid"] = np.asarray(r_grid, float)           # x-axis for lr density
-            out["rnd_lr_surface"] = np.asarray(rnd_lr, float)        # q_r(r) surface
-
+        
+            out["grid_r"], out["rnd_r_surface"] = strike_rnd_to_return_density(
+                out["rnd_k_surface"],
+                K_grid=out["grid_k"],
+                S0=float(day.S0),
+                return_type="gross",
+                normalize=True,
+            )
+        
+            out["grid_lr"] = np.asarray(out["grid_lr"], float)
+            out["rnd_lr_surface"] = np.asarray(out["rnd_lr_surface"], float)
+            out["grid_r"] = np.asarray(out["grid_r"], float)
+            out["rnd_r_surface"] = np.asarray(out["rnd_r_surface"], float)
+        
             if compute_moments:
                 cfg_m = moments_cfg if moments_cfg is not None else MomentsConfig(
                     renormalize=True,
                     clip_negative=True,
                 )
+        
                 out["rnd_moments_table"] = logreturn_moments_table(
-                    out["rnd_surface"],
-                    K_grid=out["K_grid"],
+                    out["rnd_k_surface"],
+                    K_grid=out["grid_k"],
                     T_grid=out["T_grid"],
                     S0=float(day.S0),
                     cfg=cfg_m,
                 )
-
-        # ========= IV surface =========
-        if compute_iv:
-            cfg_iv = iv_cfg if iv_cfg is not None else IVConfig()
-            iv_surf = iv_surface_from_calls(
-                out["C_fit"],
-                K_grid=K_grid,
-                T_grid=T_grid,
-                S0=float(day.S0),
-                r=float(day.r),
-                q=float(q_use),
-                cfg=cfg_iv,
-            )
-            out["iv_surface"] = np.asarray(iv_surf, float)
-            out.update(atm_summary_from_iv_surface(iv_surf, K_grid=K_grid, T_grid=T_grid, S0=float(day.S0)))
-
-            if compute_delta:
-                out["delta_dict"] = iv_surface_to_delta_surfaces(
-                    iv_surface=iv_surf,
+    
+            # ========= IV surface =========
+            if compute_iv:
+                cfg_iv = iv_cfg if iv_cfg is not None else IVConfig()
+                iv_surf = iv_surface_from_calls(
+                    out["C_fit"],
                     K_grid=K_grid,
                     T_grid=T_grid,
                     S0=float(day.S0),
                     r=float(day.r),
+                    q=float(q_use),
+                    cfg=cfg_iv,
                 )
+                out["iv_surface"] = np.asarray(iv_surf, float)
+                out.update(atm_summary_from_iv_surface(iv_surf, K_grid=K_grid, T_grid=T_grid, S0=float(day.S0)))
+    
+                if compute_delta:
+                    out["delta_dict"] = iv_surface_to_delta_surfaces(
+                        iv_surface=iv_surf,
+                        K_grid=K_grid,
+                        T_grid=T_grid,
+                        S0=float(day.S0),
+                        r=float(day.r),
+                    )
 
         # ========= CDF surface (use CLIPPED RND) =========
         if compute_cdf:
-            if "rnd_surface" not in out:
-                raise ValueError("compute_cdf=True requires compute_rnd=True (CDF needs an RND surface).")
+            if "rnd_k_surface" not in out:
+                raise ValueError("compute_cdf=True requires compute_rnd=True.")
+        
             cfg_cdf = cdf_cfg if cdf_cfg is not None else CDFConfig()
-            out["cdf_surface"] = cdf_from_pdf_surface(
-                out["rnd_surface"],
-                K_grid=K_grid,
+        
+            out["rnd_cdf_surface"] = cdf_from_pdf_surface(
+                out["rnd_k_surface"],
+                K_grid=out["grid_k"],
                 cfg=cfg_cdf,
             )
 

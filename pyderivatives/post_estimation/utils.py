@@ -812,3 +812,468 @@ def call_fit_error_timeseries(
         latex_out.write_text(latex_str, encoding="utf-8")
 
     return ts_df, summary_df, latex_str
+
+
+def export_physical_rnd_strike_percentiles(
+    density_dict,
+    output_csv="physical_rnd_strike_percentiles.csv",
+    ticker=None,
+    date=None,
+
+    # NEW:
+    target_maturities=None,
+    maturity_tolerance_days=3,
+):
+    """
+    Export strike-level percentiles under both the
+    risk-neutral and physical measures to CSV.
+
+    Parameters
+    ----------
+    target_maturities : list or None
+        Example:
+            [7, 14, 30]
+
+        Keeps only maturities nearest to these
+        target days-to-expiration values.
+
+    maturity_tolerance_days : int
+        Maximum allowed mismatch in days.
+    """
+
+    def get_key(d, names, required=True):
+        for name in names:
+            if name in d:
+                return d[name]
+
+        if required:
+            raise KeyError(f"None of these keys found: {names}")
+
+        return None
+
+    # ============================================================
+    # Load arrays
+    # ============================================================
+
+    grid_K = np.asarray(
+        get_key(density_dict, ["grid_K", "grid_k"]),
+        dtype=float
+    )
+
+    rnd_K_surface = np.asarray(
+        get_key(density_dict, ["rnd_K_surface", "rnd_k_surface"]),
+        dtype=float
+    )
+
+    physical_K_surface = np.asarray(
+        get_key(density_dict, ["physical_K_surface", "physical_k_surface"]),
+        dtype=float
+    )
+
+    # ============================================================
+    # Maturity grid
+    # ============================================================
+
+    T_grid = get_key(
+        density_dict,
+        ["matched_T_grid", "T_grid", "t_grid"],
+        required=False
+    )
+
+    if T_grid is None:
+        T_grid = np.arange(rnd_K_surface.shape[0])
+
+    else:
+        T_grid = np.asarray(T_grid, dtype=float)
+
+    # Convert to days
+    maturity_days_grid = np.round(T_grid * 365).astype(int)
+
+    # ============================================================
+    # Expiration dates
+    # ============================================================
+
+    exp_dates = get_key(
+        density_dict,
+        ["exp_dates", "exp_date", "exdates", "exdate", "expiration_dates"],
+        required=False
+    )
+
+    if exp_dates is not None:
+        exp_dates = pd.to_datetime(exp_dates)
+
+    # ============================================================
+    # Valuation date
+    # ============================================================
+
+    valuation_date = date
+
+    if valuation_date is None:
+        valuation_date = get_key(
+            density_dict,
+            ["date", "valuation_date", "current_date"],
+            required=False
+        )
+
+    if valuation_date is not None:
+        valuation_date = pd.to_datetime(valuation_date)
+
+    # ============================================================
+    # Ticker
+    # ============================================================
+
+    if ticker is None:
+        ticker = density_dict.get("ticker", None)
+
+    # ============================================================
+    # Determine which maturities to keep
+    # ============================================================
+
+    maturity_indices = np.arange(len(T_grid))
+
+    if target_maturities is not None:
+
+        selected_indices = []
+
+        for target_day in target_maturities:
+
+            closest_idx = np.argmin(
+                np.abs(maturity_days_grid - target_day)
+            )
+
+            closest_day = maturity_days_grid[closest_idx]
+
+            if abs(closest_day - target_day) <= maturity_tolerance_days:
+                selected_indices.append(closest_idx)
+
+        maturity_indices = np.unique(selected_indices)
+
+    # ============================================================
+    # Build rows
+    # ============================================================
+
+    rows = []
+
+    for i in maturity_indices:
+
+        T = T_grid[i]
+
+        # Handle 1D vs 2D strike grids
+        if grid_K.ndim == 1:
+            K = grid_K.copy()
+
+        else:
+            K = grid_K[i].copy()
+
+        rnd_pdf = np.asarray(
+            rnd_K_surface[i],
+            dtype=float
+        ).copy()
+
+        physical_pdf = np.asarray(
+            physical_K_surface[i],
+            dtype=float
+        ).copy()
+
+        # --------------------------------------------------------
+        # Sort by strike
+        # --------------------------------------------------------
+
+        order = np.argsort(K)
+
+        K = K[order]
+        rnd_pdf = rnd_pdf[order]
+        physical_pdf = physical_pdf[order]
+
+        # --------------------------------------------------------
+        # Remove invalid points
+        # --------------------------------------------------------
+
+        valid = (
+            np.isfinite(K)
+            & np.isfinite(rnd_pdf)
+            & np.isfinite(physical_pdf)
+            & (rnd_pdf >= 0)
+            & (physical_pdf >= 0)
+        )
+
+        K = K[valid]
+        rnd_pdf = rnd_pdf[valid]
+        physical_pdf = physical_pdf[valid]
+
+        if len(K) < 2:
+            continue
+
+        # --------------------------------------------------------
+        # Normalize densities
+        # --------------------------------------------------------
+
+        rnd_area = np.trapezoid(rnd_pdf, K)
+
+        physical_area = np.trapezoid(
+            physical_pdf,
+            K
+        )
+
+        rnd_pdf_norm = (
+            rnd_pdf / rnd_area
+            if rnd_area > 0 else rnd_pdf
+        )
+
+        physical_pdf_norm = (
+            physical_pdf / physical_area
+            if physical_area > 0 else physical_pdf
+        )
+
+        # --------------------------------------------------------
+        # Compute CDFs
+        # --------------------------------------------------------
+
+        dK = np.diff(K)
+
+        rnd_cdf = np.zeros_like(K)
+
+        rnd_cdf[1:] = np.cumsum(
+            0.5 * (
+                rnd_pdf_norm[:-1]
+                + rnd_pdf_norm[1:]
+            ) * dK
+        )
+
+        physical_cdf = np.zeros_like(K)
+
+        physical_cdf[1:] = np.cumsum(
+            0.5 * (
+                physical_pdf_norm[:-1]
+                + physical_pdf_norm[1:]
+            ) * dK
+        )
+
+        rnd_cdf = np.clip(rnd_cdf, 0, 1)
+
+        physical_cdf = np.clip(
+            physical_cdf,
+            0,
+            1
+        )
+
+        # --------------------------------------------------------
+        # Expiration date
+        # --------------------------------------------------------
+
+        if (
+            exp_dates is not None
+            and len(exp_dates) == len(T_grid)
+        ):
+
+            exp_date_i = exp_dates[i]
+
+        elif valuation_date is not None:
+
+            exp_date_i = (
+                valuation_date
+                + pd.to_timedelta(
+                    int(round(T * 365)),
+                    unit="D"
+                )
+            )
+
+        else:
+            exp_date_i = pd.NaT
+
+        # --------------------------------------------------------
+        # Days until expiration
+        # --------------------------------------------------------
+
+        if (
+            valuation_date is not None
+            and pd.notna(exp_date_i)
+        ):
+
+            days_until_expiration = int(
+                (exp_date_i - valuation_date).days
+            )
+
+        else:
+
+            days_until_expiration = int(
+                round(T * 365)
+            )
+
+        # --------------------------------------------------------
+        # Save rows
+        # --------------------------------------------------------
+
+        for j in range(len(K)):
+
+            rows.append({
+
+                "ticker": ticker,
+
+                "date": (
+                    valuation_date.date()
+                    if valuation_date is not None
+                    else date
+                ),
+
+                "exp_date": (
+                    exp_date_i.date()
+                    if pd.notna(exp_date_i)
+                    else None
+                ),
+
+                "days_until_expiration":
+                    days_until_expiration,
+
+                "maturity": T,
+
+                "strike": K[j],
+
+                "rnd_density": rnd_pdf[j],
+
+                "physical_density":
+                    physical_pdf[j],
+
+                "rnd_percentile_pct":
+                    100 * rnd_cdf[j],
+
+                "physical_percentile_pct":
+                    100 * physical_cdf[j],
+            })
+
+    # ============================================================
+    # Create dataframe
+    # ============================================================
+
+    df = pd.DataFrame(rows)
+
+    # ============================================================
+    # Export CSV
+    # ============================================================
+
+    df.to_csv(output_csv, index=False)
+
+    print(f"Saved percentile CSV to: {output_csv}")
+
+    return df
+
+def folder_to_optionmetrics_csv(
+    input_folder,
+    output_csv,
+    ticker="NVDL",
+    issuer="",
+    index_flag=0,
+    exercise_style="A",
+    strike_multiplier=1000
+):
+    input_folder = Path(input_folder)
+
+    if not input_folder.exists():
+        raise FileNotFoundError(f"Input folder does not exist: {input_folder}")
+
+    csv_files = sorted(input_folder.glob("*.csv"))
+
+    if len(csv_files) == 0:
+        raise FileNotFoundError(f"No CSV files found in: {input_folder}")
+
+    all_option_rows = []
+
+    for file in csv_files:
+        df = pd.read_csv(file)
+
+        required_cols = [
+            "Today's Date",
+            "Expire Date",
+            "Strike",
+            "Call Mark",
+            "Put Mark"
+        ]
+
+        missing = [col for col in required_cols if col not in df.columns]
+        if missing:
+            print(f"Skipping {file.name}; missing columns: {missing}")
+            continue
+
+        trade_date = pd.to_datetime(df["Today's Date"].dropna().iloc[0])
+        expire_date = pd.to_datetime(df["Expire Date"].dropna().iloc[0])
+
+        for cp_flag, mark_col in [("C", "Call Mark"), ("P", "Put Mark")]:
+            temp = df[["Strike", mark_col]].copy()
+            temp = temp.rename(columns={mark_col: "mark"})
+            temp = temp.dropna(subset=["Strike", "mark"])
+
+            temp = temp[temp["mark"] > 0]
+
+            temp["date"] = trade_date.strftime("%Y-%m-%d")
+            temp["exdate"] = expire_date.strftime("%Y-%m-%d")
+            temp["cp_flag"] = cp_flag
+            temp["strike_price"] = (temp["Strike"] * strike_multiplier).round().astype(int)
+
+            # Your source files only have mark prices, not bid/ask.
+            temp["best_bid"] = temp["mark"]
+            temp["best_offer"] = temp["mark"]
+
+            temp["volume"] = 0
+            temp["ticker"] = ticker
+            temp["index_flag"] = index_flag
+            temp["issuer"] = issuer
+            temp["exercise_style"] = exercise_style
+
+            temp = temp[
+                [
+                    "date",
+                    "exdate",
+                    "cp_flag",
+                    "strike_price",
+                    "best_bid",
+                    "best_offer",
+                    "volume",
+                    "ticker",
+                    "index_flag",
+                    "issuer",
+                    "exercise_style"
+                ]
+            ]
+
+            all_option_rows.append(temp)
+
+    if len(all_option_rows) == 0:
+        raise ValueError("No usable option files were found.")
+
+    optionmetrics_df = pd.concat(all_option_rows, ignore_index=True)
+
+    optionmetrics_df = optionmetrics_df.sort_values(
+        ["date", "exdate", "cp_flag", "strike_price"]
+    ).reset_index(drop=True)
+
+    optionmetrics_df.insert(
+        7,
+        "optionid",
+        range(1, len(optionmetrics_df) + 1)
+    )
+
+    optionmetrics_df["best_bid"] = optionmetrics_df["best_bid"].round(4)
+    optionmetrics_df["best_offer"] = optionmetrics_df["best_offer"].round(4)
+
+    output_csv = Path(output_csv)
+
+    if output_csv.suffix.lower() != ".csv":
+        output_csv = output_csv / f"{ticker}_optionmetrics.csv"
+
+    output_csv.parent.mkdir(parents=True, exist_ok=True)
+
+    optionmetrics_df.to_csv(output_csv, index=False)
+
+    print(f"Saved OptionMetrics-style file to:")
+    print(output_csv)
+    print(f"Rows saved: {len(optionmetrics_df)}")
+
+    return optionmetrics_df
+
+
+# compiled = folder_to_optionmetrics_csv(
+#     input_folder=r"C:\Users\beatt\Spyder directory\State Price Density\riskoptima\Riskoptima raw",
+#     output_csv=r"C:\Users\beatt\Spyder directory\State Price Density\riskoptima\NVDL_optionmetrics.csv",
+#     ticker="NVDL",
+#     issuer="GRANITESHARES 2X LONG NVDA DAILY ETF"
+# )

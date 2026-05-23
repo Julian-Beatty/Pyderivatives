@@ -119,35 +119,94 @@ class OptionMarketStandardizer:
     def standardize_frames(self, opt_raw: pd.DataFrame, stock_raw: pd.DataFrame) -> pd.DataFrame:
         # vendor adapter
         opt_std = VENDOR_REGISTRY[self.vendor_key](opt_raw)
-
-        # stock -> (date, S0)
+    
+        # -------------------------
+        # stock -> (date, stock_price)
+        # -------------------------
         stock = stock_raw.copy()
-
+    
         if self.stock_date_col not in stock.columns:
             raise ValueError(f"stock file must contain '{self.stock_date_col}' column.")
+    
+        # Your stock files usually use 'price'
         if self.stock_price_col not in stock.columns:
-            raise ValueError(f"stock file must contain '{self.stock_price_col}' column.")
-
-        stock[self.stock_date_col] = pd.to_datetime(stock[self.stock_date_col])
-        stock = stock[[self.stock_date_col, self.stock_price_col]].rename(
-            columns={self.stock_date_col: "date", self.stock_price_col: "stock_price"}
+            if "price" in stock.columns:
+                stock_price_col = "price"
+            else:
+                raise ValueError(
+                    f"stock file must contain '{self.stock_price_col}' or 'price' column."
+                )
+        else:
+            stock_price_col = self.stock_price_col
+    
+        stock[self.stock_date_col] = pd.to_datetime(
+            stock[self.stock_date_col], errors="coerce"
+        ).dt.normalize()
+    
+        stock[stock_price_col] = pd.to_numeric(stock[stock_price_col], errors="coerce")
+    
+        stock = stock[[self.stock_date_col, stock_price_col]].rename(
+            columns={
+                self.stock_date_col: "date",
+                stock_price_col: "stock_price",
+            }
         )
-        # add ticker column if provided
-
-        # merge S0
+    
+        stock = (
+            stock.dropna(subset=["date", "stock_price"])
+                 .sort_values("date")
+                 .drop_duplicates("date", keep="last")
+        )
+    
+        # -------------------------
+        # normalize option dates
+        # -------------------------
         opt_std = ensure_timestamp(opt_std, ["date", "exdate"])
+    
+        opt_std["date"] = pd.to_datetime(
+            opt_std["date"], errors="coerce"
+        ).dt.normalize()
+    
+        opt_std["exdate"] = pd.to_datetime(
+            opt_std["exdate"], errors="coerce"
+        ).dt.normalize()
+    
+        # -------------------------
+        # merge stock price
+        # -------------------------
         opt_std = opt_std.merge(stock, on="date", how="left")
-
+    
+        if opt_std["stock_price"].isna().any():
+            missing_dates = (
+                opt_std.loc[opt_std["stock_price"].isna(), "date"]
+                .drop_duplicates()
+                .sort_values()
+                .head(10)
+                .tolist()
+            )
+            raise ValueError(
+                "Some option dates could not be matched to stock prices. "
+                f"Example missing dates: {missing_dates}"
+            )
+    
+        # -------------------------
         # compute T / DTE
-        EPS = 2.05e-4  # ~0.000365 days ≈ 2.4 hours 
-        opt_std["rounded_maturity"] = yearfrac_act365(opt_std["date"], opt_std["exdate"])
-        opt_std["rounded_maturity"] = opt_std["rounded_maturity"].clip(lower=EPS) # 0 maturity clipped to tiny maturity
-        opt_std["T"] = yearfrac_act365(opt_std["date"], opt_std["exdate"])
-        opt_std["DTE"] = (pd.to_datetime(opt_std["exdate"]) - pd.to_datetime(opt_std["date"])).dt.days
+        # -------------------------
+        EPS = 2.05e-4  # same-day options get tiny positive maturity
+    
+        T_raw = yearfrac_act365(opt_std["date"], opt_std["exdate"])
+    
+        opt_std["rounded_maturity"] = T_raw.clip(lower=EPS)
+        opt_std["T"] = T_raw.clip(lower=EPS)
+    
+        opt_std["DTE"] = (opt_std["exdate"] - opt_std["date"]).dt.days
         opt_std["DTE"] = opt_std["DTE"].clip(lower=1).astype(int)
-
+    
+        # -------------------------
         # attach rates
+        # -------------------------
         rc = self.rate_curve_df
+    
         opt_std = attach_rates_from_surface_nearest(
             opt_std,
             rc,
@@ -158,41 +217,103 @@ class OptionMarketStandardizer:
             force_min_dte=1,
             date_tolerance_days=None,
         )
-
+    
         opt_std = opt_std.rename(columns={"r": "risk_free_rate"})
-        opt_std["risk_free_rate"] = opt_std["risk_free_rate"] / 100
-        opt_std["moneyness"] = (opt_std["strike"] / opt_std["stock_price"])
-
+        opt_std["risk_free_rate"] = pd.to_numeric(
+            opt_std["risk_free_rate"], errors="coerce"
+        ) / 100.0
+    
+        # -------------------------
+        # moneyness
+        # -------------------------
+        opt_std["strike"] = pd.to_numeric(opt_std["strike"], errors="coerce")
+        opt_std["stock_price"] = pd.to_numeric(opt_std["stock_price"], errors="coerce")
+        opt_std["moneyness"] = opt_std["strike"] / opt_std["stock_price"]
+    
+        # -------------------------
+        # quote cleanup
+        # -------------------------
+        for c in ["best_bid", "mid_price", "best_offer", "volume"]:
+            if c in opt_std.columns:
+                opt_std[c] = pd.to_numeric(opt_std[c], errors="coerce")
+    
+        opt_std["option_right"] = (
+            opt_std["option_right"]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .str[0]
+        )
+    
         opt_std = opt_std[
             (opt_std["best_bid"] <= opt_std["best_offer"]) &
             (opt_std["best_offer"] > 0) &
             (opt_std["mid_price"] > 0) &
-            (opt_std["best_bid"] > 0)
+            (opt_std["best_bid"] > 0) &
+            (opt_std["strike"] > 0) &
+            (opt_std["stock_price"] > 0) &
+            (opt_std["risk_free_rate"].notna())
         ]
-
+    
+        # -------------------------
+        # collapse duplicate strikes
+        # -------------------------
         opt_std = collapse_duplicate_strikes(opt_std)
-
-
+    
+        # -------------------------
+        # required columns
+        # -------------------------
         needed = {
-            "date", "exdate", "option_right", "strike", "moneyness",
-            "best_bid", "best_offer", "mid_price",
-            "rounded_maturity", "stock_price", "risk_free_rate", "volume"
+            "date",
+            "exdate",
+            "option_right",
+            "strike",
+            "moneyness",
+            "best_bid",
+            "best_offer",
+            "mid_price",
+            "rounded_maturity",
+            "stock_price",
+            "risk_free_rate",
+            "volume",
         }
+    
         missing = needed - set(opt_std.columns)
         if missing:
-            raise ValueError(f"Standardization incomplete. Missing columns: {sorted(missing)}")
-
+            raise ValueError(
+                f"Standardization incomplete. Missing columns: {sorted(missing)}"
+            )
+    
+        # -------------------------
+        # final standardized output
+        # -------------------------
         opt_std = opt_std[
-            ["date","exdate","rounded_maturity","moneyness","option_right","strike",
-             "best_bid","mid_price","best_offer","stock_price","risk_free_rate","volume"]
+            [
+                "date",
+                "exdate",
+                "rounded_maturity",
+                "moneyness",
+                "option_right",
+                "strike",
+                "best_bid",
+                "mid_price",
+                "best_offer",
+                "stock_price",
+                "risk_free_rate",
+                "volume",
+            ]
         ]
+    
         opt_std = opt_std.sort_values(
             by=["date", "rounded_maturity", "option_right", "strike"]
-        )
-        
-        # --- add ticker label ---
+        ).reset_index(drop=True)
+    
+        # -------------------------
+        # add ticker label
+        # -------------------------
         if self.ticker is not None:
             opt_std["ticker"] = str(self.ticker)
+    
         return opt_std
 
     def keep_options(
@@ -364,22 +485,28 @@ def attach_rates_from_surface_nearest(
     *,
     opt_date_col: str = "date",
     opt_exdate_col: str = "exdate",
-    opt_dte_col: str = "DTE",            # or "rounded_maturity" if that's your DTE-in-days
+    opt_dte_col: str = "DTE",
     rate_date_col: str = "Date",
-    force_min_dte: int = 1,              # 0DTE -> 1
-    date_tolerance_days: int | None = None,   # None = no limit
+    force_min_dte: int = 1,
+    date_tolerance_days: int | None = None,
 ) -> pd.DataFrame:
     out = opt.copy()
 
-    # --- normalize option date and DTE ---
-    out[opt_date_col] = pd.to_datetime(out[opt_date_col]).dt.normalize()
+    # --- normalize option date and force datetime64[ns] ---
+    out[opt_date_col] = pd.to_datetime(
+        out[opt_date_col], errors="coerce"
+    ).dt.normalize()
+    out[opt_date_col] = out[opt_date_col].astype("datetime64[ns]")
 
+    # --- compute DTE if needed ---
     if opt_dte_col not in out.columns:
         out[opt_dte_col] = (
-            pd.to_datetime(out[opt_exdate_col]) - pd.to_datetime(out[opt_date_col])
+            pd.to_datetime(out[opt_exdate_col], errors="coerce").dt.normalize()
+            - out[opt_date_col]
         ).dt.days
 
     dte = pd.to_numeric(out[opt_dte_col], errors="coerce")
+
     if dte.isna().any():
         bad = out.loc[dte.isna(), [opt_date_col, opt_exdate_col]].head(5)
         raise ValueError(f"Some rows have invalid DTE. Example rows:\n{bad}")
@@ -389,32 +516,51 @@ def attach_rates_from_surface_nearest(
 
     # --- normalize rate surface date ---
     rc = rate_surface.copy()
+
     if rate_date_col in rc.columns:
         rc = rc.rename(columns={rate_date_col: "rate_date"})
     elif rc.index.name == rate_date_col:
         rc = rc.reset_index().rename(columns={rate_date_col: "rate_date"})
     else:
-        raise ValueError(f"rate_surface must have '{rate_date_col}' column or index.")
+        raise ValueError(
+            f"rate_surface must have '{rate_date_col}' column or index."
+        )
 
-    rc["rate_date"] = pd.to_datetime(rc["rate_date"]).dt.normalize()
+    rc["rate_date"] = pd.to_datetime(
+        rc["rate_date"], errors="coerce"
+    ).dt.normalize()
+    rc["rate_date"] = rc["rate_date"].astype("datetime64[ns]")
+
+    rc = rc.dropna(subset=["rate_date"])
 
     # --- build list of available maturity days and their columns ---
     mat_cols = [c for c in rc.columns if c != "rate_date"]
     day_map = {c: _parse_day_from_col(c) for c in mat_cols}
     keep = [(c, d) for c, d in day_map.items() if d is not None]
+
     if not keep:
         raise ValueError("No maturity columns like '90/365' found in rate_surface.")
 
-    # sort maturities by day
     keep.sort(key=lambda x: x[1])
+
     cols_sorted = [c for c, _ in keep]
     days_sorted = np.array([d for _, d in keep], dtype=int)
 
-    # keep only rate_date + maturity columns in sorted order
-    rc = rc[["rate_date"] + cols_sorted].sort_values("rate_date").reset_index(drop=True)
+    rc = (
+        rc[["rate_date"] + cols_sorted]
+        .sort_values("rate_date")
+        .drop_duplicates("rate_date", keep="last")
+        .reset_index(drop=True)
+    )
 
-    # --- Step A: map option date -> nearest available rate_date (weekends ok) ---
-    unique_rate_dates = rc[["rate_date"]].drop_duplicates().sort_values("rate_date").reset_index(drop=True)
+    # --- Step A: map option date -> nearest available rate_date ---
+    unique_rate_dates = (
+        rc[["rate_date"]]
+        .drop_duplicates()
+        .sort_values("rate_date")
+        .reset_index(drop=True)
+    )
+
     out = out.sort_values(opt_date_col).reset_index(drop=True)
 
     tol = None if date_tolerance_days is None else pd.Timedelta(days=date_tolerance_days)
@@ -429,41 +575,51 @@ def attach_rates_from_surface_nearest(
     )
 
     if out["rate_date"].isna().any():
-        bad_dates = out.loc[out["rate_date"].isna(), opt_date_col].head(5).tolist()
-        raise ValueError(f"Some option dates could not be matched to a rate curve date. Examples: {bad_dates}")
+        bad_dates = (
+            out.loc[out["rate_date"].isna(), opt_date_col]
+            .head(5)
+            .tolist()
+        )
+        raise ValueError(
+            f"Some option dates could not be matched to a rate curve date. "
+            f"Examples: {bad_dates}"
+        )
 
-    # --- Step B: nearest maturity day via searchsorted ---
-    # index of nearest maturity day for each option
+    # --- Step B: nearest maturity day ---
     idx = np.searchsorted(days_sorted, out["_dte_int"].to_numpy(), side="left")
     idx = np.clip(idx, 0, len(days_sorted) - 1)
 
-    # compare left vs right neighbor to choose nearest
-    # (only where there is a left neighbor)
     has_left = idx > 0
     left_idx = idx - 1
     right_idx = idx
 
     d = out["_dte_int"].to_numpy()
+
     choose_left = np.zeros_like(idx, dtype=bool)
-    choose_left[has_left] = (d[has_left] - days_sorted[left_idx[has_left]]) <= (days_sorted[right_idx[has_left]] - d[has_left])
+    choose_left[has_left] = (
+        d[has_left] - days_sorted[left_idx[has_left]]
+    ) <= (
+        days_sorted[right_idx[has_left]] - d[has_left]
+    )
+
     nearest_idx = np.where(choose_left, left_idx, right_idx)
 
     out["r_dte_days"] = days_sorted[nearest_idx]
 
-    # --- pull the rate values ---
-    # reindex rc to align with out rows by rate_date
+    # --- pull rate values ---
     rc_idxed = rc.set_index("rate_date")
-    rows = out["rate_date"].to_numpy()
-    # column name for each row
     col_for_row = np.array(cols_sorted, dtype=object)[nearest_idx]
 
-    # vectorized gather: do it by splitting by column (fast enough and simple)
     out["r"] = np.nan
+
     for c in np.unique(col_for_row):
         mask = col_for_row == c
-        out.loc[mask, "r"] = rc_idxed.loc[out.loc[mask, "rate_date"], c].to_numpy()
+        out.loc[mask, "r"] = rc_idxed.loc[
+            out.loc[mask, "rate_date"], c
+        ].to_numpy()
 
     out = out.drop(columns=["_dte_int"])
+
     return out
 
 AggPrice = Literal["max", "min", "mean", "median", "last", "vwavg"]

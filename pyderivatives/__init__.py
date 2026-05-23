@@ -15,18 +15,18 @@ from .yieldcurve.plotting_functions import plot_yield_curve, plot_yield_surface
 # -------------------------
 # conditional_pricing_kernel
 # -------------------------
-from . import conditional_pricing_kernel  # <-- ADD THIS
+# from . import conditional_pricing_kernel  # <-- old
 
-from .conditional_pricing_kernel.config import *
-from .conditional_pricing_kernel.data import *
-from .conditional_pricing_kernel.eval import *
-from .conditional_pricing_kernel.fit import *
-from .conditional_pricing_kernel.kernel import *
-from .conditional_pricing_kernel.moments import *
-from .conditional_pricing_kernel.bootstrap import *
-from .conditional_pricing_kernel.cache import *
-from .conditional_pricing_kernel.panel_plots import *
-from .conditional_pricing_kernel.eval import evaluate_anchor_surfaces_with_theta_master
+# from .conditional_pricing_kernel.config import *
+# from .conditional_pricing_kernel.data import *
+# from .conditional_pricing_kernel.eval import *
+# from .conditional_pricing_kernel.fit import *
+# from .conditional_pricing_kernel.kernel import *
+# from .conditional_pricing_kernel.moments import *
+# from .conditional_pricing_kernel.bootstrap import *
+# from .conditional_pricing_kernel.cache import *
+# from .conditional_pricing_kernel.panel_plots import *
+# from .conditional_pricing_kernel.eval import evaluate_anchor_surfaces_with_theta_master
 
 # (optional but common)
 # -------------------------
@@ -74,49 +74,35 @@ from .post_estimation.generalizedquantilesreg import*
 
 # (optional) also export plotters at the top-level convenience API
 from .arbitrage_repair import plot_surface, plot_panels, plot_perturb, plot_term, plot_heatmap
-# __all__ = [
-#     # subpackages
-#     "yieldcurve",
-#     "global_pricer",
-#     "option_market_standardizer",
-#     "arbitrage_repair",
 
-#     # yieldcurve exports
-#     "create_yield_curve",
-#     "build_yield_dataframe",
-#     "plot_yield_curve",
-#     "plot_yield_surface",
+# -------------------------
+# pricing_kernels
+# -------------------------
+from . import pricing_kernels
 
-#     # pricingkernel exports
+from .pricing_kernels import (
+    get_transform,
+    available_transforms,
+    register_transform,
+    ThetaSpec,
+    ConditionalRiskSpec,
+    BetaCalibrationSpec,
+    NonparametricCalibrationSpec,
+    BootstrapSpec,
+    CacheSpec,
+    KeySpec,
+    FitDiagnostics,
 
-#     "conditional_pricing_kernel",
-#     "ThetaSpec", "BootstrapSpec", "CacheSpec", "EvalSpec",
-#     "estimate_pricing_kernel_global", "evaluate_anchor_surfaces_with_theta_master",
-
-#     # global pricer exports
-#     "GlobalSurfacePricer",
-#     "surfaces",
-#     "panels",
-#     "SafetyClipConfig",
-#     "IVConfig",
-    
-#     #io import
-#     "make_day_from_df",
-
-#     # option market standardizer exports
-#     "OptionMarketStandardizer",
-#     "summarize_put_call_parity_diff",
-#     "put_call_parity",
-#     "VENDOR_REGISTRY",
-
-#     # arbitrage repair exports
-#     "arbitrage_repair",
-#     "RepairConfig",
-#     "CallSurfaceArbRepair",
-#     "repair_arb",
-#     "plot_surface",
-#     "plot_panels",
-#     "plot_perturb",
-#     "plot_term",
-#     "plot_heatmap",
-# ]
+    plot_surface,
+    plot_surface_panels,
+    plot_pqk_multipanel,
+    plot_pricing_kernel_surface,
+    plot_physical_density_surface,
+    plot_rnd_surface,
+    plot_rra_surface,
+    plot_physical_density_panels,
+    plot_rnd_panels,
+    plot_pricing_kernel_panels,
+    plot_rra_panels,
+    plot_surface_3d_by_T,
+)
