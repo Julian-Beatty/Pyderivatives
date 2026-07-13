@@ -15,11 +15,13 @@ def day_from_df(
     price_col: str = "C_rep",
     rate_col: str = "risk_free_rate",
     spot_col: str = "stock_price",
+    date_col: str = "date",
     option_type_col: Optional[str] = "option_right",
     call_flag: str = "c",
     q: float = 0.0,
     dropna: bool = True,
 ) -> CallSurfaceDay:
+
     if option_type_col is not None:
         s = df[option_type_col].astype(str).str.lower()
         df = df.loc[s == call_flag]
@@ -38,4 +40,14 @@ def day_from_df(
     r_med = float(np.median(df[rate_col].to_numpy(float)))
     S0_med = float(np.median(df[spot_col].to_numpy(float)))
 
-    return CallSurfaceDay(S0=S0_med, r=r_med, q=float(q), K_obs=K, T_obs=T, C_obs=C)
+    date = pd.Timestamp(df[date_col].iloc[0])
+
+    return CallSurfaceDay(
+        S0=S0_med,
+        r=r_med,
+        q=float(q),
+        K_obs=K,
+        T_obs=T,
+        C_obs=C,
+        date=date,
+    )

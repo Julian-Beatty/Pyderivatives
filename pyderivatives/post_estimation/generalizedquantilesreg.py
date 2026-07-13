@@ -1254,6 +1254,13 @@ def run_asym_quantreg_with_controls(
     X_C_extra: Optional[Sequence[str]] = None,
     nw_lags: Optional[int] = None,
     mom_cross_contemporaneous: bool = True,
+    # NEW:
+    #   moment_mode="diff"  -> old behavior: dep vars are d_var, d_skew, d_kurt
+    #   moment_mode="level" -> dep vars are var, skew, kurt
+    #   standardize=True   -> z-score y and X variables after lag construction/dropna
+    moment_mode: str = "diff",
+    standardize: bool = False,
+    zscore_ddof: int = 0,
     segments: Optional[Dict[str, List[float]]] = None,
     alpha_tests: float = 0.05,
     equations_to_run: Optional[Sequence[str]] = None,
@@ -1269,11 +1276,36 @@ def run_asym_quantreg_with_controls(
     """
     Quantile regressions with aligned bootstrap draws across taus, plus joint tests and diagnostics.
 
-    Plotting rule:
-      If plot_test_dist=True, we auto-enable store_test_boot_dist=True.
+    NEW options
+    -----------
+    moment_mode : {"diff", "level"}
+        "diff" keeps the original specification:
+            dep vars = d_var, d_skew, d_kurt
+            moment lags = d_var_L1, d_skew_L1, d_kurt_L1, ...
+        "level" estimates the same regressions in moment levels:
+            dep vars = var, skew, kurt
+            moment lags = var_L1, skew_L1, kurt_L1, ...
+
+    standardize : bool
+        If True, z-scores all variables used in the model after lag construction
+        and after dropping missing values.  This means coefficients are in
+        standard-deviation units.  The constant is not standardized.
+
+    zscore_ddof : int
+        Degrees of freedom used for the z-score standard deviation.  ddof=0 is
+        the usual population z-score convention.
     """
     if plot_test_dist and (not store_test_boot_dist):
         store_test_boot_dist = True
+
+    moment_mode = str(moment_mode).lower().strip()
+    if moment_mode not in {"diff", "level", "levels", "difference", "differences"}:
+        raise ValueError("moment_mode must be one of {'diff','level'}.")
+
+    if moment_mode in {"level", "levels"}:
+        moment_mode = "level"
+    else:
+        moment_mode = "diff"
 
     r = r_df[[date_col, ret_col]].copy()
     r[date_col] = pd.to_datetime(r[date_col])
@@ -1284,6 +1316,14 @@ def run_asym_quantreg_with_controls(
         if not isinstance(ss.index, pd.DatetimeIndex):
             ss.index = pd.to_datetime(ss.index)
         return ss.to_frame().reset_index().rename(columns={"index": date_col})
+
+    def _zscore_series(x: pd.Series, *, ddof: int = 0) -> Tuple[pd.Series, float, float]:
+        xx = pd.to_numeric(x, errors="coerce").astype(float)
+        mu = float(xx.mean(skipna=True))
+        sd = float(xx.std(skipna=True, ddof=ddof))
+        if (not np.isfinite(sd)) or sd <= 0.0:
+            return xx * np.nan, mu, sd
+        return (xx - mu) / sd, mu, sd
 
     var_df = _series_to_df(var_s, "var")
     skew_df = _series_to_df(skew_s, "skew")
@@ -1310,10 +1350,14 @@ def run_asym_quantreg_with_controls(
         keep = [date_col] + control_names
         df = df.merge(cdf[keep], on=date_col, how="left")
 
+    # Always create first differences so the old mode remains available and
+    # so users can still include them manually through X_*_extra if desired.
     df["d_var"] = df["var"].diff()
     df["d_skew"] = df["skew"].diff()
     df["d_kurt"] = df["kurt"].diff()
 
+    # Return decomposition is done on raw log returns first.
+    # If standardize=True, ret_pos/ret_neg and their lags are z-scored after construction.
     df["ret_pos"] = df[ret_col].clip(lower=0.0)
     df["ret_neg"] = df[ret_col].clip(upper=0.0)
 
@@ -1321,10 +1365,27 @@ def run_asym_quantreg_with_controls(
         df[f"ret_pos_L{L}"] = df["ret_pos"].shift(L)
         df[f"ret_neg_L{L}"] = df["ret_neg"].shift(L)
 
-    for L in range(1, n_mom_lags + 1):
-        df[f"d_var_L{L}"] = df["d_var"].shift(L)
-        df[f"d_skew_L{L}"] = df["d_skew"].shift(L)
-        df[f"d_kurt_L{L}"] = df["d_kurt"].shift(L)
+    # Moment variables used by the regression.
+    if moment_mode == "level":
+        dep_A, dep_B, dep_C = "var", "skew", "kurt"
+        moment_bases = ["var", "skew", "kurt"]
+        eq_names = {
+            "A_var": "Variance level",
+            "B_skew": "Skewness level",
+            "C_kurt": "Kurtosis level",
+        }
+    else:
+        dep_A, dep_B, dep_C = "d_var", "d_skew", "d_kurt"
+        moment_bases = ["d_var", "d_skew", "d_kurt"]
+        eq_names = {
+            "A_var": "Delta variance",
+            "B_skew": "Delta skewness",
+            "C_kurt": "Delta kurtosis",
+        }
+
+    for base in moment_bases:
+        for L in range(1, n_mom_lags + 1):
+            df[f"{base}_L{L}"] = df[base].shift(L)
 
     controls_terms: List[str] = []
     if control_names:
@@ -1345,8 +1406,6 @@ def run_asym_quantreg_with_controls(
                     df[nm] = df[c].shift(L)
                     controls_terms.append(nm)
 
-    df_model = df.dropna().copy() if dropna else df.copy()
-
     ret_terms = (
         ["ret_pos", "ret_neg"]
         + [f"ret_pos_L{L}" for L in range(1, n_ret_lags + 1)]
@@ -1354,9 +1413,8 @@ def run_asym_quantreg_with_controls(
     )
 
     def _mom_terms_for_eq(dep_mom: str) -> List[str]:
-        moms = ["d_var", "d_skew", "d_kurt"]
         terms: List[str] = []
-        for m in moms:
+        for m in moment_bases:
             if m == dep_mom:
                 terms += [f"{m}_L{L}" for L in range(1, n_mom_lags + 1)]
             else:
@@ -1364,6 +1422,37 @@ def run_asym_quantreg_with_controls(
                     terms.append(m)
                 terms += [f"{m}_L{L}" for L in range(1, n_mom_lags + 1)]
         return terms
+
+    X_A = ret_terms + _mom_terms_for_eq(dep_A) + controls_terms + (list(X_A_extra) if X_A_extra else [])
+    X_B = ret_terms + _mom_terms_for_eq(dep_B) + controls_terms + (list(X_B_extra) if X_B_extra else [])
+    X_C = ret_terms + _mom_terms_for_eq(dep_C) + controls_terms + (list(X_C_extra) if X_C_extra else [])
+
+    # Drop missing after all lags/differences are constructed.
+    df_model = df.dropna().copy() if dropna else df.copy()
+
+    # Optional z-scoring.  We standardize the actual columns used by any selected equation.
+    # This includes y variables and RHS variables, but not the date column or intercept.
+    standardization: Dict[str, Dict[str, float]] = {}
+    if standardize:
+        cols_to_standardize: List[str] = []
+        cols_to_standardize += [dep_A, dep_B, dep_C]
+        cols_to_standardize += list(X_A) + list(X_B) + list(X_C)
+
+        # Preserve order and remove duplicates.
+        seen = set()
+        cols_to_standardize = [
+            c for c in cols_to_standardize
+            if not (c in seen or seen.add(c)) and c in df_model.columns and c != date_col
+        ]
+
+        for c in cols_to_standardize:
+            z, mu, sd = _zscore_series(df_model[c], ddof=zscore_ddof)
+            df_model[c] = z
+            standardization[c] = {"mean": mu, "std": sd, "ddof": int(zscore_ddof)}
+
+        if dropna:
+            # If any zero-variance column produced NaNs, remove affected rows.
+            df_model = df_model.dropna().copy()
 
     def _run_eq(dep: str, X_cols: List[str], equation_name: str) -> dict:
         y = df_model[dep].to_numpy(float)
@@ -1394,6 +1483,7 @@ def run_asym_quantreg_with_controls(
         se_boot = pd.DataFrame([se_dict[t] for t in taus_t], index=taus_t, columns=colnames)
         t_boot = params / se_boot
         p_boot_norm = t_boot.map(_pval_from_t_normal)
+
         q_pseudo_r2: Dict[float, float] = {}
         q_prsquared: Dict[float, float] = {}
         for tau in taus_t:
@@ -1449,8 +1539,18 @@ def run_asym_quantreg_with_controls(
                 "ret_col": ret_col,
                 "nw_lags": int(maxlags),
                 "mom_cross_contemporaneous": bool(mom_cross_contemporaneous),
+                "moment_mode": moment_mode,
+                "standardize": bool(standardize),
+                "zscore_ddof": int(zscore_ddof),
             },
         }
+
+        if standardize:
+            out_eq["standardization"] = {
+                c: standardization[c]
+                for c in [dep] + [x for x in X_cols if x in standardization]
+                if c in standardization
+            }
 
         if store_boot_params:
             out_eq["boot_params"] = boot_params
@@ -1486,10 +1586,6 @@ def run_asym_quantreg_with_controls(
 
         return out_eq
 
-    X_A = ret_terms + _mom_terms_for_eq("d_var") + controls_terms + (list(X_A_extra) if X_A_extra else [])
-    X_B = ret_terms + _mom_terms_for_eq("d_skew") + controls_terms + (list(X_B_extra) if X_B_extra else [])
-    X_C = ret_terms + _mom_terms_for_eq("d_kurt") + controls_terms + (list(X_C_extra) if X_C_extra else [])
-
     eqs = list(equations_to_run) if equations_to_run is not None else ["A_var", "B_skew", "C_kurt"]
     bad = sorted(set(eqs) - {"A_var", "B_skew", "C_kurt"})
     if bad:
@@ -1498,14 +1594,17 @@ def run_asym_quantreg_with_controls(
     out = {
         "data": df_model,
         "controls_terms": controls_terms,
+        "moment_mode": moment_mode,
+        "standardize": bool(standardize),
+        "standardization": standardization if standardize else {},
     }
 
     if "A_var" in eqs:
-        out["A_var"] = _run_eq("d_var", X_A, equation_name="Delta variance")
+        out["A_var"] = _run_eq(dep_A, X_A, equation_name=eq_names["A_var"])
     if "B_skew" in eqs:
-        out["B_skew"] = _run_eq("d_skew", X_B, equation_name="Delta skewness")
+        out["B_skew"] = _run_eq(dep_B, X_B, equation_name=eq_names["B_skew"])
     if "C_kurt" in eqs:
-        out["C_kurt"] = _run_eq("d_kurt", X_C, equation_name="Delta kurtosis")
+        out["C_kurt"] = _run_eq(dep_C, X_C, equation_name=eq_names["C_kurt"])
 
     return out
 

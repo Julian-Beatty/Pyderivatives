@@ -14,7 +14,7 @@ from .methods.exponential_polynomial import ExponentialPolynomialKernel
 from .methods.conditional_risk import ConditionalRiskKernel
 from .methods.beta_calibration import BetaCalibration
 from .methods.nonparametric_calibration import NonparametricCalibration
-
+from .methods.crra import CRRAKernel
 from .plots import (
     plot_surface,
     plot_surface_panels,
@@ -30,6 +30,8 @@ from .plots import (
     plot_surface_3d_by_T,
     plot_pricing_kernel_3d_surface_by_T,
     M_Q_K_multipanel_multi,
+    plot_pit_calibration_panels
+    
 )
 __all__ = [
     "get_transform",
@@ -49,6 +51,7 @@ __all__ = [
     "ConditionalRiskKernel",
     "BetaCalibration",
     "NonparametricCalibration",
+    "CRRAKernel",
 
     "plot_surface",
     "plot_surface_panels",
@@ -64,4 +67,5 @@ __all__ = [
     "plot_surface_3d_by_T",
     "plot_pricing_kernel_3d_surface_by_T",
     "M_Q_K_multipanel_multi",
+    "plot_pit_calibration_panels"
 ]

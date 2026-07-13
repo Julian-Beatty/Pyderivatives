@@ -150,7 +150,7 @@ def extract_moment_premia_timeseries(
                 table_key=physical_table_key,
                 tol_years=tol_years,
             )
-
+        
             # --- risk-neutral ---
             rnd = extract_physical_moment_timeseries(
                 rnd_dict,
@@ -161,10 +161,16 @@ def extract_moment_premia_timeseries(
                 table_key=rnd_table_key,
                 tol_years=tol_years,
             )
-
-            # --- premia ---
+        
+            # Convert volatility from decimal to percent
+            # Convert volatility from decimal to percent
+            if m in ("var", "vol", "vol_ann", "volatility"):
+                phys = phys * 100.0
+                rnd = rnd * 100.0
+        
+            # --- premium ---
             prem = rnd - phys
-
+        
             res_T[f"phys_{m}"] = phys
             res_T[f"rnd_{m}"] = rnd
             res_T[f"prem_{m}"] = prem
@@ -297,6 +303,7 @@ from pathlib import Path
 def summary_stat(
     moments_by_asset: dict,
     *,
+    stock_df=None,
     horizons: list[int] | None = None,
     moments: tuple[str, ...] = ("vol_ann", "skew", "kurt"),
     which: tuple[str, ...] = ("phys",),
@@ -304,37 +311,51 @@ def summary_stat(
     adf_regression: str = "c",
     adf_autolag: str | None = "AIC",
     lb_lags: int = 2,
-    save_dir: str | Path = ".",
+    save_dir=".",
     file_stub: str = "summary_stats",
     use_small_headers: bool = True,
+    stock_price_col: str = "price",
+    stock_adj_col: str = "ajexdi",
+    stock_date_col: str = "date",
+    stock_asset_col: str = "tic",
 ):
     """
-    Create summary-statistic tables from `moments_by_asset`.
+    Create summary-statistic tables from moments_by_asset.
 
-    Features:
-    - JB and LB report test statistics, not p-values
-    - significance stars are based on p-values
-    - ADF and Ljung-Box are applied to first differences
-    - one LaTeX table per horizon
-    - one combined LaTeX table across all horizons
-    - no visible NaNs in header rows
-    - inserts \\midrule between horizons in the all-horizons table
+    Output structure:
+      Levels
+        Panel A: Vol.
+        Panel B: Skew.
+        Panel C: Kurt.
+        Panel D: Stock
 
-    Expected structure:
-      moments_by_asset[asset][horizon_days][key] -> pandas.Series
-    where key is like "phys_vol_ann", "phys_skew", "phys_kurt", etc.
+      First differences
+        Panel A: Delta Vol.
+        Panel B: Delta Skew.
+        Panel C: Delta Kurt.
+        Panel D: r_t / r_{t-1}
+
+    Statistics reported:
+      Mean, SD, 0.10, 0.25, 0.50, 0.75, 0.90, JB, LB, ADF
+
+    Notes:
+    - Stock price is adjusted as price / ajexdi.
+    - Moment first differences use x_t - x_{t-1}.
+    - Stock return panel uses adjusted_price_t / adjusted_price_{t-1}.
+    - JB, LB, and ADF are applied to the series shown in that panel.
     """
+
     import numpy as np
     import pandas as pd
+    from pathlib import Path
 
-    from scipy.stats import jarque_bera, skew as _skew, kurtosis as _kurtosis
+    from scipy.stats import jarque_bera
     from statsmodels.tsa.stattools import adfuller
     from statsmodels.stats.diagnostic import acorr_ljungbox
 
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    # ---- infer horizons if not provided ----
     if horizons is None:
         horizons = None
         for _, d in moments_by_asset.items():
@@ -342,27 +363,33 @@ def summary_stat(
                 horizons = sorted([k for k in d.keys() if isinstance(k, (int, np.integer))])
                 break
         if horizons is None or len(horizons) == 0:
-            raise ValueError("Could not infer horizons from moments_by_asset keys. Pass `horizons=[...]`.")
-
-    PANEL_LABELS = {
-        "vol_ann": "Panel A: Vol.",
-        "skew":    "Panel B: Skew.",
-        "kurt":    "Panel C: Kurt.",
-    }
+            raise ValueError("Could not infer horizons from moments_by_asset keys. Pass horizons=[...].")
 
     if use_small_headers:
-        COLS = ["Mean", "SD", "Min", "Max", "Skew", "Kurt", "JB", "ADF", f"LB({lb_lags})"]
+        COLS = ["Mean", "SD", "0.10", "0.25", "0.50", "0.75", "0.90", "JB", f"LB({lb_lags})", "ADF"]
     else:
-        COLS = ["Mean", "Std. Dev.", "Min.", "Max.", "Skewness", "Kurtosis", "J-B", "ADF", f"LB({lb_lags})"]
+        COLS = ["Mean", "Std. Dev.", "Q10", "Q25", "Median", "Q75", "Q90", "J-B", f"L-B({lb_lags})", "ADF"]
+
+    LEVEL_PANEL_LABELS = {
+        "vol_ann": "Panel A: Vol.",
+        "skew": "Panel B: Skew.",
+        "kurt": "Panel C: Kurt.",
+    }
+
+    DIFF_PANEL_LABELS = {
+        "vol_ann": "Panel A: Delta Vol.",
+        "skew": "Panel B: Delta Skew.",
+        "kurt": "Panel C: Delta Kurt.",
+    }
 
     def _stars_from_pval(pval: float) -> str:
         if pd.isna(pval):
             return ""
         if pval <= 0.01:
             return "***"
-        elif pval <= 0.05:
+        if pval <= 0.05:
             return "**"
-        elif pval <= 0.10:
+        if pval <= 0.10:
             return "*"
         return ""
 
@@ -372,73 +399,84 @@ def summary_stat(
     def _fmt_stat(val, stars=""):
         return "" if pd.isna(val) else f"{float(val):.{digits}f}{stars}"
 
-    def _adf_on_diff_with_stars(x: np.ndarray):
-        x = x[np.isfinite(x)]
-        dx = np.diff(x)
-        if dx.size < 20:
-            return np.nan, "", np.nan
-        try:
-            stat, pval, *_ = adfuller(dx, regression=adf_regression, autolag=adf_autolag)
-            stat = float(stat)
-            pval = float(pval)
-            return stat, _stars_from_pval(pval), pval
-        except Exception:
-            return np.nan, "", np.nan
-
-    def _lb_stat_on_diff_with_stars(x: np.ndarray):
-        x = x[np.isfinite(x)]
-        dx = np.diff(x)
-        if dx.size < (lb_lags + 5):
-            return np.nan, "", np.nan
-        try:
-            lb = acorr_ljungbox(dx, lags=[lb_lags], return_df=True)
-            stat = float(lb["lb_stat"].iloc[0])
-            pval = float(lb["lb_pvalue"].iloc[0])
-            return stat, _stars_from_pval(pval), pval
-        except Exception:
-            return np.nan, "", np.nan
-
     def _jb_stat_with_stars(x: np.ndarray):
         x = x[np.isfinite(x)]
         if x.size < 5:
-            return np.nan, "", np.nan
+            return np.nan, ""
         try:
             jb = jarque_bera(x)
-            stat = float(jb.statistic)
-            pval = float(jb.pvalue)
-            return stat, _stars_from_pval(pval), pval
+            return float(jb.statistic), _stars_from_pval(float(jb.pvalue))
         except Exception:
-            return np.nan, "", np.nan
+            return np.nan, ""
+
+    def _adf_stat_with_stars(x: np.ndarray):
+        x = x[np.isfinite(x)]
+        if x.size < 20:
+            return np.nan, ""
+        try:
+            stat, pval, *_ = adfuller(x, regression=adf_regression, autolag=adf_autolag)
+            return float(stat), _stars_from_pval(float(pval))
+        except Exception:
+            return np.nan, ""
+
+    def _lb_stat_with_stars(x: np.ndarray):
+        x = x[np.isfinite(x)]
+        if x.size < (lb_lags + 5):
+            return np.nan, ""
+        try:
+            lb = acorr_ljungbox(x, lags=[lb_lags], return_df=True)
+            stat = float(lb["lb_stat"].iloc[0])
+            pval = float(lb["lb_pvalue"].iloc[0])
+            return stat, _stars_from_pval(pval)
+        except Exception:
+            return np.nan, ""
 
     def _series_stats(s):
-        x = pd.to_numeric(s, errors="coerce").dropna().values
+        x = pd.to_numeric(pd.Series(s), errors="coerce").dropna().to_numpy(dtype=float)
+
         if x.size == 0:
             return dict(
-                mean=np.nan, std=np.nan, min=np.nan, max=np.nan,
-                skew=np.nan, kurt=np.nan,
+                mean=np.nan, std=np.nan,
+                q10=np.nan, q25=np.nan, q50=np.nan, q75=np.nan, q90=np.nan,
                 jb=np.nan, jb_stars="",
+                lb=np.nan, lb_stars="",
                 adf=np.nan, adf_stars="",
-                lb=np.nan, lb_stars=""
             )
 
-        jb_stat, jb_stars, _ = _jb_stat_with_stars(x)
-        adf_stat, adf_stars, _ = _adf_on_diff_with_stars(x)
-        lb_stat, lb_stars, _ = _lb_stat_on_diff_with_stars(x)
+        jb_stat, jb_stars = _jb_stat_with_stars(x)
+        lb_stat, lb_stars = _lb_stat_with_stars(x)
+        adf_stat, adf_stars = _adf_stat_with_stars(x)
 
         return dict(
             mean=float(np.mean(x)),
             std=float(np.std(x, ddof=1)) if x.size > 1 else np.nan,
-            min=float(np.min(x)),
-            max=float(np.max(x)),
-            skew=float(_skew(x, bias=False)) if x.size > 2 else np.nan,
-            kurt=float(_kurtosis(x, fisher=False, bias=False)) if x.size > 3 else np.nan,
+            q10=float(np.quantile(x, 0.10)),
+            q25=float(np.quantile(x, 0.25)),
+            q50=float(np.quantile(x, 0.50)),
+            q75=float(np.quantile(x, 0.75)),
+            q90=float(np.quantile(x, 0.90)),
             jb=jb_stat,
             jb_stars=jb_stars,
-            adf=adf_stat,
-            adf_stars=adf_stars,
             lb=lb_stat,
             lb_stars=lb_stars,
+            adf=adf_stat,
+            adf_stars=adf_stars,
         )
+
+    def _stats_row(s):
+        stats = _series_stats(s)
+        return [
+            stats["mean"],
+            stats["std"],
+            stats["q10"],
+            stats["q25"],
+            stats["q50"],
+            stats["q75"],
+            stats["q90"],
+            _fmt_stat(stats["jb"], stats["jb_stars"]),
+            _fmt_stat(stats["lb"], stats["lb_stars"]),
+            _fmt_stat(stats["adf"], stats["adf_stars"]),
+        ]
 
     def _make_header_row(label: str, columns: list[str]) -> pd.DataFrame:
         return pd.DataFrame(
@@ -446,6 +484,19 @@ def summary_stat(
             index=pd.Index([label], name="Asset"),
             columns=columns,
         )
+
+    def _format_df_for_latex(df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        numeric_cols = COLS[:7]
+        stat_cols = COLS[7:]
+
+        for c in numeric_cols:
+            out[c] = out[c].map(lambda v: _fmt_num(v) if not isinstance(v, str) else v)
+
+        for c in stat_cols:
+            out[c] = out[c].map(lambda v: "" if pd.isna(v) else str(v))
+
+        return out
 
     def _latex_wrap(tabular: str, caption: str, label: str) -> str:
         return (
@@ -460,6 +511,44 @@ def summary_stat(
             "\\end{table}\n"
         )
 
+    def _stock_series_for_asset(asset: str):
+        if stock_df is None:
+            return None
+
+        if isinstance(stock_df, dict):
+            df = stock_df.get(asset, None)
+            if df is None:
+                return None
+        else:
+            df = stock_df.copy()
+            if stock_asset_col in df.columns:
+                df = df[df[stock_asset_col].astype(str) == str(asset)]
+
+        if df is None or len(df) == 0:
+            return None
+
+        df = df.copy()
+
+        if stock_date_col in df.columns:
+            df[stock_date_col] = pd.to_datetime(df[stock_date_col])
+            df = df.sort_values(stock_date_col)
+        else:
+            df = df.sort_index()
+
+        if stock_price_col not in df.columns:
+            raise ValueError(f"stock_df must contain price column '{stock_price_col}'.")
+
+        price = pd.to_numeric(df[stock_price_col], errors="coerce")
+
+        if stock_adj_col in df.columns:
+            adj = pd.to_numeric(df[stock_adj_col], errors="coerce")
+            adj_price = price / adj
+        else:
+            adj_price = price
+
+        adj_price = adj_price.replace([np.inf, -np.inf], np.nan).dropna()
+        return adj_price
+
     assets = list(moments_by_asset.keys())
     out = {}
     all_horizon_parts = []
@@ -468,8 +557,13 @@ def summary_stat(
         panel_dfs = {}
         combined_parts = []
 
+        # =========================
+        # Levels
+        # =========================
+        combined_parts.append(_make_header_row("Levels", COLS))
+
         for m in moments:
-            panel = PANEL_LABELS.get(m, f"Panel: {m}")
+            panel = LEVEL_PANEL_LABELS.get(m, f"Panel: {m}")
             rows = []
             idx = []
 
@@ -484,32 +578,101 @@ def summary_stat(
                     if s is None:
                         continue
 
-                    stats = _series_stats(s)
-                    asset_label = asset if len(which) == 1 else f"{asset}-{w}"
-                    idx.append(asset_label)
-                    rows.append([
-                        stats["mean"],
-                        stats["std"],
-                        stats["min"],
-                        stats["max"],
-                        stats["skew"],
-                        stats["kurt"],
-                        _fmt_stat(stats["jb"], stats["jb_stars"]),
-                        _fmt_stat(stats["adf"], stats["adf_stars"]),
-                        _fmt_stat(stats["lb"], stats["lb_stars"]),
-                    ])
+                    label = asset if len(which) == 1 else f"{asset}-{w}"
+                    idx.append(label)
+                    rows.append(_stats_row(s))
 
-            df = pd.DataFrame(
-                rows,
-                index=pd.Index(idx, name="Asset"),
-                columns=COLS,
-            )
-
-            panel_dfs[panel] = df
+            df = pd.DataFrame(rows, index=pd.Index(idx, name="Asset"), columns=COLS)
+            panel_dfs[f"Levels - {panel}"] = df
 
             if not df.empty:
                 combined_parts.append(_make_header_row(panel, COLS))
                 combined_parts.append(df)
+
+        # Stock price levels
+        stock_rows = []
+        stock_idx = []
+
+        for asset in assets:
+            px = _stock_series_for_asset(asset)
+            if px is None:
+                continue
+            stock_idx.append(asset)
+            stock_rows.append(_stats_row(px))
+
+        stock_levels_df = pd.DataFrame(
+            stock_rows,
+            index=pd.Index(stock_idx, name="Asset"),
+            columns=COLS,
+        )
+
+        panel_dfs["Levels - Panel D: Stock"] = stock_levels_df
+
+        if not stock_levels_df.empty:
+            combined_parts.append(_make_header_row("Panel D: Stock", COLS))
+            combined_parts.append(stock_levels_df)
+
+        # =========================
+        # First differences
+        # =========================
+        combined_parts.append(_make_header_row("First differences", COLS))
+
+        for m in moments:
+            panel = DIFF_PANEL_LABELS.get(m, f"Panel: Delta {m}")
+            rows = []
+            idx = []
+
+            for asset in assets:
+                hdict = moments_by_asset.get(asset, {})
+                if H not in hdict or not isinstance(hdict[H], dict):
+                    continue
+
+                for w in which:
+                    key = f"{w}_{m}"
+                    s = hdict[H].get(key, None)
+                    if s is None:
+                        continue
+
+                    x = pd.to_numeric(pd.Series(s), errors="coerce").dropna()
+                    dx = x.diff().dropna()
+
+                    label = asset if len(which) == 1 else f"{asset}-{w}"
+                    idx.append(label)
+                    rows.append(_stats_row(dx))
+
+            df = pd.DataFrame(rows, index=pd.Index(idx, name="Asset"), columns=COLS)
+            panel_dfs[f"First differences - {panel}"] = df
+
+            if not df.empty:
+                combined_parts.append(_make_header_row(panel, COLS))
+                combined_parts.append(df)
+
+        # Stock returns: adjusted_price_t / adjusted_price_{t-1}
+        stock_ret_rows = []
+        stock_ret_idx = []
+
+        for asset in assets:
+            px = _stock_series_for_asset(asset)
+            if px is None:
+                continue
+
+            ret_ratio = px / px.shift(1)
+            ret_ratio = ret_ratio.replace([np.inf, -np.inf], np.nan).dropna()
+
+            stock_ret_idx.append(asset)
+            stock_ret_rows.append(_stats_row(ret_ratio))
+
+        stock_ret_df = pd.DataFrame(
+            stock_ret_rows,
+            index=pd.Index(stock_ret_idx, name="Asset"),
+            columns=COLS,
+        )
+
+        panel_dfs["First differences - Panel D: r_t/r_{t-1}"] = stock_ret_df
+
+        if not stock_ret_df.empty:
+            combined_parts.append(_make_header_row("Panel D: $r_t/r_{t-1}$", COLS))
+            combined_parts.append(stock_ret_df)
 
         combined_df = pd.concat(combined_parts) if combined_parts else pd.DataFrame()
 
@@ -517,16 +680,7 @@ def summary_stat(
         tex_path = None
 
         if not combined_df.empty:
-            df_ltx = combined_df.copy()
-
-            numeric_cols = COLS[:6]
-            stat_cols = COLS[6:]
-
-            for c in numeric_cols:
-                df_ltx[c] = df_ltx[c].map(lambda v: _fmt_num(v) if not isinstance(v, str) else v)
-
-            for c in stat_cols:
-                df_ltx[c] = df_ltx[c].map(lambda v: "" if pd.isna(v) else str(v))
+            df_ltx = _format_df_for_latex(combined_df)
 
             tabular = df_ltx.to_latex(
                 escape=False,
@@ -537,8 +691,8 @@ def summary_stat(
             )
 
             caption = (
-                f"Summary statistics for moment series ({H}-day horizon). "
-                f"JB is reported in levels. ADF and LB are applied to first differences. "
+                f"Summary statistics for moment and stock series ({H}-day horizon). "
+                f"Stock prices are adjusted as price divided by {stock_adj_col}. "
                 f"Stars denote 1\\%, 5\\%, and 10\\% significance."
             )
 
@@ -574,13 +728,12 @@ def summary_stat(
             label=None,
         )
 
-        # Insert a midrule before each horizon row except the first one
         for H in horizons[1:]:
             tabular = tabular.replace(f"\n{H}d ", f"\n\\midrule\n{H}d ")
 
         caption = (
-            "Summary statistics for moment series across all horizons. "
-            "JB is reported in levels. ADF and LB are applied to first differences. "
+            "Summary statistics for moment and stock series across all horizons. "
+            f"Stock prices are adjusted as price divided by {stock_adj_col}. "
             "Stars denote 1\\%, 5\\%, and 10\\% significance."
         )
 
@@ -600,7 +753,6 @@ def summary_stat(
     }
 
     return out
-
 
 
 def call_fit_error_timeseries(

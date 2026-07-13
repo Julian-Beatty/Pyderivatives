@@ -5,7 +5,14 @@ from typing import Literal, Optional, Union
 
 import numpy as np
 import matplotlib.pyplot as plt
+from typing import Sequence
+def _maturity_label_days(T_years: float) -> str:
+    days = float(T_years) * 365.0
 
+    if days < 1.0:
+        return "Same day"
+
+    return f"{days:.0f} days"
 
 def _pick_panel_indices(T_grid: np.ndarray, n_panels: int) -> np.ndarray:
     T = np.asarray(T_grid, float).ravel()
@@ -125,6 +132,20 @@ def _x_mask(x: np.ndarray, x_bounds: Optional[tuple[float, float]]) -> np.ndarra
     return mask
 
 
+from typing import Optional, Union, Literal
+from pathlib import Path
+import numpy as np
+
+from typing import Optional, Union, Literal
+from pathlib import Path
+import numpy as np
+
+
+from typing import Optional, Union, Literal
+from pathlib import Path
+import numpy as np
+
+
 def call_panels(
     res: dict,
     *,
@@ -138,10 +159,26 @@ def call_panels(
     figsize_per_panel: float = 2.2,
     K_pad_frac: float = 0.05,
     K_pad_abs: float = 0.0,
+    x_axis: Literal["k", "r", "lr"] = "k",
+    x_bounds: Optional[tuple[float, float]] = None,
+    auto_ylim_visible: bool = True,
+    y_pad_frac: float = 0.05,
     save: Optional[Union[str, Path]] = None,
     dpi: int = 200,
     show: bool = True,
 ):
+    """
+    x_axis convention:
+        "k"  = strike K
+        "r"  = gross return / moneyness K/S
+        "lr" = log return log(K/S)
+
+    Examples:
+        x_axis="k",  x_bounds=(6700, 7050)
+        x_axis="r",  x_bounds=(0.98, 1.02)
+        x_axis="lr", x_bounds=(-0.02, 0.02)
+    """
+
     K_grid = np.asarray(res["grid_k"], float).ravel()
     T_grid = np.asarray(res["T_grid"], float).ravel()
     C_fit = np.asarray(res["C_fit"], float)
@@ -169,24 +206,58 @@ def call_panels(
     if K_obs.size == 0:
         raise ValueError("No valid observed quotes to plot.")
 
-    Kmin_obs = float(np.nanmin(K_obs))
-    Kmax_obs = float(np.nanmax(K_obs))
-    obs_range = max(Kmax_obs - Kmin_obs, 1e-12)
-
-    pad = float(K_pad_abs) + float(K_pad_frac) * obs_range
-
-    Kmin_plot = max(Kmin_obs - pad, float(np.nanmin(K_grid)))
-    Kmax_plot = min(Kmax_obs + pad, float(np.nanmax(K_grid)))
-
-    k_mask = (K_grid >= Kmin_plot) & (K_grid <= Kmax_plot)
-
-    if np.sum(k_mask) < 2:
-        raise ValueError("Strike window has too few grid points to plot.")
-
     if spot is None:
         spot = res.get("S0", None) or getattr(day, "S0", None) or getattr(day, "spot", None)
 
     spot = float(spot) if spot is not None else None
+
+    if x_axis in ("r", "lr") and spot is None:
+        raise ValueError("spot must be provided when x_axis is 'r' or 'lr'.")
+
+    if x_axis == "k":
+        X_grid = K_grid
+        X_obs = K_obs
+        x_label = "Strike K"
+        spot_x = spot
+
+    elif x_axis == "r":
+        X_grid = K_grid / spot
+        X_obs = K_obs / spot
+        x_label = "Gross return / moneyness K/S"
+        spot_x = 1.0
+
+    elif x_axis == "lr":
+        X_grid = np.log(K_grid / spot)
+        X_obs = np.log(K_obs / spot)
+        x_label = "Log return log(K/S)"
+        spot_x = 0.0
+
+    else:
+        raise ValueError("x_axis must be one of {'k', 'r', 'lr'}.")
+
+    if x_bounds is None:
+        Xmin_obs = float(np.nanmin(X_obs))
+        Xmax_obs = float(np.nanmax(X_obs))
+        obs_range = max(Xmax_obs - Xmin_obs, 1e-12)
+
+        if x_axis == "k":
+            pad = float(K_pad_abs) + float(K_pad_frac) * obs_range
+        else:
+            pad = float(K_pad_frac) * obs_range
+
+        Xmin_plot = Xmin_obs - pad
+        Xmax_plot = Xmax_obs + pad
+    else:
+        Xmin_plot, Xmax_plot = map(float, x_bounds)
+
+    x_mask = (X_grid >= Xmin_plot) & (X_grid <= Xmax_plot)
+
+    if np.sum(x_mask) < 2:
+        raise ValueError(
+            f"X-axis window has too few grid points to plot. "
+            f"x_axis={x_axis}, x_bounds=({Xmin_plot}, {Xmax_plot}), "
+            f"grid range=({np.nanmin(X_grid)}, {np.nanmax(X_grid)})."
+        )
 
     T_sorted = np.sort(np.unique(T_obs))
 
@@ -206,7 +277,9 @@ def call_panels(
     if T_centers.size <= n_panels:
         T_panels = T_centers
     else:
-        idx = np.unique(np.round(np.linspace(0, T_centers.size - 1, n_panels)).astype(int))
+        idx = np.unique(
+            np.round(np.linspace(0, T_centers.size - 1, n_panels)).astype(int)
+        )
         T_panels = T_centers[idx]
 
     fig, axes, nrows, ncols = _make_axes(
@@ -216,39 +289,58 @@ def call_panels(
         sharex=True,
     )
 
-    K_plot = K_grid[k_mask]
+    X_plot = X_grid[x_mask]
 
     for ax, T_panel in zip(axes[: len(T_panels)], T_panels):
         qmask = np.abs(T_obs - T_panel) <= T_cluster_tol
         fit_idx = int(np.argmin(np.abs(T_grid - T_panel)))
 
+        visible_obs = qmask & (X_obs >= Xmin_plot) & (X_obs <= Xmax_plot)
+
         if np.any(qmask):
             ax.scatter(
-                K_obs[qmask],
+                X_obs[qmask],
                 C_obs[qmask],
                 s=22,
                 alpha=0.9,
                 label="Observed",
             )
 
+        fit_y = C_fit[fit_idx, x_mask]
+
         ax.plot(
-            K_plot,
-            C_fit[fit_idx, k_mask],
+            X_plot,
+            fit_y,
             linewidth=2.2,
             label="Global model",
         )
 
-        if spot is not None and Kmin_plot <= spot <= Kmax_plot:
-            ax.axvline(spot, linestyle="--", linewidth=1.5, label="Spot")
+        if spot_x is not None and Xmin_plot <= spot_x <= Xmax_plot:
+            ax.axvline(spot_x, linestyle="--", linewidth=1.5, label="Spot")
+
+        ax.set_xlim(Xmin_plot, Xmax_plot)
+
+        if auto_ylim_visible:
+            y_candidates = []
+
+            if np.any(visible_obs):
+                y_candidates.append(np.nanmax(C_obs[visible_obs]))
+
+            if fit_y.size > 0 and np.any(np.isfinite(fit_y)):
+                y_candidates.append(np.nanmax(fit_y))
+
+            if len(y_candidates) > 0:
+                ymax = float(np.nanmax(y_candidates))
+                if np.isfinite(ymax):
+                    ax.set_ylim(0, ymax * (1.0 + y_pad_frac))
 
         d = f"{date_str} " if date_str else ""
-        ax.set_title(f"{d}T ≈ {T_panel:.5g} yr")
+        ax.set_title(f"{d}T ≈ {_maturity_label_days(T_panel)}")
         ax.set_ylabel("Call price")
         ax.grid(True, alpha=0.25)
         ax.legend(loc=legend_loc)
-        ax.set_xlim(Kmin_plot, Kmax_plot)
 
-    axes[len(T_panels) - 1].set_xlabel("Strike K")
+    axes[len(T_panels) - 1].set_xlabel(x_label)
 
     fig.suptitle(title)
     fig.tight_layout()
@@ -329,7 +421,6 @@ def iv_panels(
 
     return _save_show(fig, save=save, dpi=dpi, show=show)
 
-
 def rnd_panels(
     res: dict,
     *,
@@ -346,13 +437,70 @@ def rnd_panels(
     figsize_per_panel: float = 2.2,
     show_spot: bool = True,
 
-    # ---- ADD THESE BACK ----
     pct_lower: Optional[float] = None,
     pct_upper: Optional[float] = None,
     mark_percentiles: bool = True,
     pct_line_style: str = ":",
     pct_line_width: float = 2.0,
+
+    show_mode: bool = True,
+    show_median: bool = True,
+    mode_line_style: str = "-.",
+    median_line_style: str = "--",
+    mode_line_width: float = 2.0,
+    median_line_width: float = 2.0,
+    mode_color: str = "tab:purple",
+    median_color: str = "tab:orange",
+    target_maturities: Optional[Sequence[float]] = None,
+    
+    rnd_dict: Optional[dict] = None,
+    snap_percentiles_to_traded_strikes: bool = False,
+    snap_maturity_tol: float = 1.0 / 365.0,
+
+    only_plot_traded_maturities: bool = False,
+    traded_maturity_tol: float = 1.5 / 365.0,
+
+    x_tick_nbins: int = 10,
+    show_mean: bool = True,
+    mean_line_style: str = "-",
+    mean_line_width: float = 2.0,
+    mean_color: str = "tab:brown",
 ):
+    import numpy as np
+    from matplotlib.ticker import MaxNLocator
+
+    def _cdf_prob_at_x(xv, pdf, xmark):
+        xv = np.asarray(xv, float)
+        pdf = np.clip(np.asarray(pdf, float), 0.0, np.inf)
+
+        good = np.isfinite(xv) & np.isfinite(pdf)
+
+        xv = xv[good]
+        pdf = pdf[good]
+
+        if xv.size < 2:
+            return np.nan
+
+        order = np.argsort(xv)
+        xv = xv[order]
+        pdf = pdf[order]
+
+        area = np.trapezoid(pdf, xv)
+
+        if not np.isfinite(area) or area <= 0:
+            return np.nan
+
+        pdf = pdf / area
+
+        cdf = np.concatenate([
+            [0.0],
+            np.cumsum((pdf[1:] + pdf[:-1]) * 0.5 * np.diff(xv))
+        ])
+
+        cdf = np.clip(cdf, 0.0, 1.0)
+
+        return float(np.interp(xmark, xv, cdf))
+
     def _to_prob(p):
         if p is None:
             return None
@@ -367,9 +515,21 @@ def rnd_panels(
 
         return p
 
-
     def _quantile_from_pdf(xv, pdf, qprob):
+        xv = np.asarray(xv, float)
         pdf = np.clip(np.asarray(pdf, float), 0.0, np.inf)
+
+        good = np.isfinite(xv) & np.isfinite(pdf)
+
+        xv = xv[good]
+        pdf = pdf[good]
+
+        if xv.size < 2:
+            return np.nan
+
+        order = np.argsort(xv)
+        xv = xv[order]
+        pdf = pdf[order]
 
         area = np.trapezoid(pdf, xv)
 
@@ -386,19 +546,176 @@ def rnd_panels(
         cdf = np.clip(cdf, 0.0, 1.0)
 
         return float(np.interp(qprob, cdf, xv))
-    x_axis = str(x_axis).lower()
+
+    def _get_single_rnd_day():
+        if rnd_dict is None:
+            return None
+
+        if isinstance(rnd_dict, dict) and "day" in rnd_dict:
+            return rnd_dict["day"]
+
+        if isinstance(rnd_dict, dict) and len(rnd_dict) == 1:
+            entry = next(iter(rnd_dict.values()))
+
+            if isinstance(entry, dict) and "day" in entry:
+                return entry["day"]
+
+        return None
+
+    def _get_day_arrays(rnd_day):
+        if rnd_day is None:
+            return None, None
+
+        if isinstance(rnd_day, dict):
+            K_obs = np.asarray(rnd_day["K_obs"], float).ravel()
+            T_obs = np.asarray(rnd_day["T_obs"], float).ravel()
+        else:
+            K_obs = np.asarray(rnd_day.K_obs, float).ravel()
+            T_obs = np.asarray(rnd_day.T_obs, float).ravel()
+
+        valid = (
+            np.isfinite(K_obs)
+            & np.isfinite(T_obs)
+            & (K_obs > 0)
+            & (T_obs >= 0)
+        )
+
+        return K_obs[valid], T_obs[valid]
+
+    def _snap_to_traded_x(xmark, T_target):
+        if rnd_day is None or not np.isfinite(xmark):
+            return xmark
+
+        K_obs, T_obs = _get_day_arrays(rnd_day)
+
+        if K_obs is None or K_obs.size == 0:
+            return xmark
+
+        tmask = np.abs(T_obs - float(T_target)) <= float(snap_maturity_tol)
+
+        if np.any(tmask):
+            K_use = K_obs[tmask]
+        else:
+            K_use = K_obs
+
+        if x_axis == "k":
+            K_raw = float(xmark)
+            S0 = None
+
+        else:
+            S0 = res.get("S0", None)
+
+            if S0 is None and isinstance(rnd_day, dict):
+                S0 = rnd_day.get("S0", None)
+
+            if S0 is None:
+                S0 = getattr(rnd_day, "S0", None)
+
+            if S0 is None:
+                return xmark
+
+            S0 = float(S0)
+
+            if x_axis == "r":
+                K_raw = float(xmark) * S0
+            elif x_axis == "lr":
+                K_raw = float(np.exp(xmark) * S0)
+            else:
+                return xmark
+
+        K_snap = float(K_use[np.argmin(np.abs(K_use - K_raw))])
+
+        if x_axis == "k":
+            return K_snap
+        elif x_axis == "r":
+            return K_snap / S0
+        elif x_axis == "lr":
+            return float(np.log(K_snap / S0))
+
+        return xmark
+
+    def _pick_traded_maturity_indices(T_grid, rnd_day, max_panels):
+        K_obs, T_obs = _get_day_arrays(rnd_day)
+
+        if T_obs is None or T_obs.size == 0:
+            raise ValueError(
+                "only_plot_traded_maturities=True requires rnd_dict={'day': day}."
+            )
+
+        traded_T = np.sort(np.unique(np.round(T_obs, 10)))
+
+        idxs = []
+
+        for T_traded in traded_T:
+            j = int(np.argmin(np.abs(T_grid - T_traded)))
+            dist = abs(float(T_grid[j]) - float(T_traded))
+
+            if dist <= float(traded_maturity_tol):
+                if j not in idxs:
+                    idxs.append(j)
+
+        if len(idxs) == 0:
+            raise ValueError(
+                "No traded maturities matched T_grid. Increase traded_maturity_tol "
+                "or include the traded maturities in T_grid."
+            )
+
+        return np.asarray(idxs[:max_panels], dtype=int)
+
+    x_axis = str(x_axis).lower().strip()
+
+    if x_axis in {"strike", "k"}:
+        x_axis = "k"
+    elif x_axis in {"logreturn", "log_return", "lr"}:
+        x_axis = "lr"
+    elif x_axis in {"r", "return", "gross_return"}:
+        x_axis = "r"
+    else:
+        raise ValueError("x_axis must be 'k', 'r', or 'lr'.")
 
     x = _get_grid(res, x_axis)
     qsurf = _get_rnd_surface(res, x_axis)
     T_grid = np.asarray(res["T_grid"], float).ravel()
 
     if qsurf.shape != (T_grid.size, x.size):
-        raise ValueError(f"RND surface has shape {qsurf.shape}, expected {(T_grid.size, x.size)}.")
+        raise ValueError(
+            f"RND surface has shape {qsurf.shape}, "
+            f"expected {(T_grid.size, x.size)}."
+        )
 
     xmask = _x_mask(x, x_bounds)
     x_plot = x[xmask]
 
-    idxT = _pick_panel_indices(T_grid, n_panels)
+    rnd_day = _get_single_rnd_day()
+
+    if target_maturities is not None:
+    
+        targets = np.asarray(target_maturities, float)
+    
+        # assume user passes days
+        targets = targets / 365.0
+    
+        idxT = []
+    
+        for target in targets:
+            j = int(np.argmin(np.abs(T_grid - target)))
+    
+            if j not in idxT:
+                idxT.append(j)
+    
+        idxT = np.asarray(idxT, dtype=int)
+    
+    elif only_plot_traded_maturities:
+    
+        idxT = _pick_traded_maturity_indices(
+            T_grid=T_grid,
+            rnd_day=rnd_day,
+            max_panels=int(n_panels),
+        )
+    
+    else:
+    
+        idxT = _pick_panel_indices(T_grid, n_panels)
     n_actual = len(idxT)
 
     fig, axes, nrows, ncols = _make_axes(
@@ -409,60 +726,176 @@ def rnd_panels(
     )
 
     xlabel, ylabel = _axis_labels(x_axis)
+
     qL = _to_prob(pct_lower)
     qU = _to_prob(pct_upper)
-    
+
     want_pct = (
         bool(mark_percentiles)
         and ((qL is not None) or (qU is not None))
     )
 
     for ax, j in zip(axes[:n_actual], idxT):
-        ax.plot(x_plot, qsurf[j, xmask], linewidth=2.2, label="RND")
+        pdf_row = qsurf[j, xmask]
+
+        ax.plot(
+            x_plot,
+            pdf_row,
+            linewidth=2.2,
+            label="RND",
+        )
+
+        # --------------------------------------------------
+        # Literal mode: never snapped to traded strikes
+        # --------------------------------------------------
+        if show_mode:
+            good_mode = np.isfinite(x_plot) & np.isfinite(pdf_row)
+
+            if np.any(good_mode):
+                x_mode = float(x_plot[good_mode][np.argmax(pdf_row[good_mode])])
+
+                ax.axvline(
+                    x_mode,
+                    linestyle=mode_line_style,
+                    linewidth=mode_line_width,
+                    color=mode_color,
+                    label=f"Mode: K={x_mode:.2f}" if x_axis == "k" else f"Mode: {x_mode:.4f}",
+                )
+
+        # --------------------------------------------------
+        # Literal median: never snapped to traded strikes
+        # --------------------------------------------------
+        if show_median:
+            x_med = _quantile_from_pdf(x_plot, pdf_row, 0.50)
+
+            if np.isfinite(x_med):
+                ax.axvline(
+                    x_med,
+                    linestyle=median_line_style,
+                    linewidth=median_line_width,
+                    color=median_color,
+                    label=f"Median: K={x_med:.2f}" if x_axis == "k" else f"Median: {x_med:.4f}",
+                )
+        # --------------------------------------------------
+        # Mean: literal density mean
+        # --------------------------------------------------
+        if show_mean:
+        
+            pdf_mean = np.clip(np.asarray(pdf_row, float), 0.0, np.inf)
+        
+            area = np.trapezoid(pdf_mean, x_plot)
+        
+            if np.isfinite(area) and area > 0:
+        
+                pdf_mean = pdf_mean / area
+        
+                x_mean = float(
+                    np.trapezoid(
+                        x_plot * pdf_mean,
+                        x_plot
+                    )
+                )
+        
+                ax.axvline(
+                    x_mean,
+                    linestyle=mean_line_style,
+                    linewidth=mean_line_width,
+                    color=mean_color,
+                    label=(
+                        f"Mean: K={x_mean:.2f}"
+                        if x_axis == "k"
+                        else f"Mean: {x_mean:.4f}"
+                    ),
+                )
+        # --------------------------------------------------
+        # Tail percentiles: optionally snapped to traded strikes
+        # --------------------------------------------------
         if want_pct:
-
-            pdf_row = qsurf[j, xmask]
-
             if qL is not None:
                 xL = _quantile_from_pdf(x_plot, pdf_row, qL)
 
+                if snap_percentiles_to_traded_strikes:
+                    xL = _snap_to_traded_x(xL, T_grid[j])
+
                 if np.isfinite(xL):
+                    actual_pct = 100 * _cdf_prob_at_x(x_plot, pdf_row, xL)
+
+                    if x_axis == "k":
+                        lab = f"{actual_pct:.1f}% (K={xL:.2f})"
+                    elif x_axis == "r":
+                        lab = f"{actual_pct:.1f}% (R={xL:.4f})"
+                    else:
+                        lab = f"{actual_pct:.1f}% (lr={xL:.4f})"
+
                     ax.axvline(
                         xL,
                         linestyle=pct_line_style,
                         linewidth=pct_line_width,
                         color="tab:red",
-                        label=f"p{int(round(qL * 100))}",
+                        label=lab,
                     )
 
             if qU is not None:
                 xU = _quantile_from_pdf(x_plot, pdf_row, qU)
 
+                if snap_percentiles_to_traded_strikes:
+                    xU = _snap_to_traded_x(xU, T_grid[j])
+
                 if np.isfinite(xU):
+                    actual_pct = 100 * _cdf_prob_at_x(x_plot, pdf_row, xU)
+
+                    if x_axis == "k":
+                        lab = f"{actual_pct:.1f}% (K={xU:.2f})"
+                    elif x_axis == "r":
+                        lab = f"{actual_pct:.1f}% (R={xU:.4f})"
+                    else:
+                        lab = f"{actual_pct:.1f}% (lr={xU:.4f})"
+
                     ax.axvline(
                         xU,
                         linestyle=pct_line_style,
                         linewidth=pct_line_width,
                         color="tab:green",
-                        label=f"p{int(round(qU * 100))}",
+                        label=lab,
                     )
 
         if show_spot:
             if x_axis == "lr" and x_plot.min() <= 0 <= x_plot.max():
-                ax.axvline(0.0, linestyle="--", linewidth=1.3, label="Spot")
+                ax.axvline(
+                    0.0,
+                    linestyle="--",
+                    linewidth=1.3,
+                    label="Spot: lr=0",
+                )
+
             elif x_axis == "r" and x_plot.min() <= 1 <= x_plot.max():
-                ax.axvline(1.0, linestyle="--", linewidth=1.3, label="Spot")
+                ax.axvline(
+                    1.0,
+                    linestyle="--",
+                    linewidth=1.3,
+                    label="Spot: R=1",
+                )
+
             elif x_axis == "k":
                 spot = res.get("S0", None)
+
                 if spot is not None:
                     spot = float(spot)
+
                     if x_plot.min() <= spot <= x_plot.max():
-                        ax.axvline(spot, linestyle="--", linewidth=1.3, label="Spot")
+                        ax.axvline(
+                            spot,
+                            linestyle="--",
+                            linewidth=1.3,
+                            label=f"Spot: K={spot:.2f}",
+                        )
 
         d = f"{date_str} " if date_str else ""
-        ax.set_title(f"{d}T = {float(T_grid[j]):.5g} yr")
+
+        ax.set_title(f"{d}T = {_maturity_label_days(T_grid[j])}")
         ax.set_ylabel(ylabel)
         ax.grid(True, alpha=0.25)
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=x_tick_nbins))
         ax.legend(loc=legend_loc)
 
     for ax in axes[n_actual:]:
@@ -644,7 +1077,86 @@ def delta_panels(
     fig.tight_layout()
 
     return _save_show(fig, save=save, dpi=dpi, show=show)
+def gamma_panels(
+    res: dict,
+    *,
+    n_panels: int = 6,
+    title: str = "Gamma Panels",
+    x_axis: Literal["k", "lr", "r"] = "r",
+    x_bounds: Optional[tuple[float, float]] = None,
+    panel_shape: Optional[tuple[int, int]] = None,
+    save: Optional[Union[str, Path]] = None,
+    dpi: int = 300,
+    show: bool = True,
+    figsize_per_panel: float = 2.2,
+):
+    if "gamma_surface" not in res:
+        raise KeyError("Missing gamma surface. Expected res['gamma_surface'].")
 
+    gamma = np.asarray(res["gamma_surface"], float)
+    T_grid = np.asarray(res["T_grid"], float).ravel()
+
+    if x_axis == "k":
+        x = np.asarray(res["grid_k"], float).ravel()
+        xlabel = "Strike K"
+        spot_x = res.get("S0", None)
+
+    elif x_axis == "lr":
+        x = np.asarray(res["grid_lr"], float).ravel()
+        xlabel = "Log return lr = log(K/S0)"
+        spot_x = 0.0
+
+    elif x_axis == "r":
+        x = np.asarray(res["grid_r"], float).ravel()
+        xlabel = "Gross return R = K/S0"
+        spot_x = 1.0
+
+    else:
+        raise ValueError("x_axis must be one of {'k', 'lr', 'r'}.")
+
+    if gamma.shape != (T_grid.size, x.size):
+        raise ValueError(
+            f"gamma_surface has shape {gamma.shape}, expected {(T_grid.size, x.size)}."
+        )
+
+    xmask = _x_mask(x, x_bounds)
+    x_plot = x[xmask]
+
+    idxT = _pick_panel_indices(T_grid, n_panels)
+    n_actual = len(idxT)
+
+    fig, axes, nrows, ncols = _make_axes(
+        n_actual,
+        panel_shape=panel_shape,
+        figsize_per_panel=figsize_per_panel,
+        sharex=True,
+    )
+
+    for ax, j in zip(axes[:n_actual], idxT):
+        y = gamma[j, xmask]
+
+        ax.plot(x_plot, y, linewidth=2.0)
+        ax.set_title(f"T = {float(T_grid[j]):.5g} yr")
+        ax.set_ylabel("BS gamma")
+        ax.grid(True, alpha=0.25)
+
+        if spot_x is not None:
+            spot_x = float(spot_x)
+            if x_plot.min() <= spot_x <= x_plot.max():
+                ax.axvline(spot_x, linestyle="--", linewidth=1.3, label="Spot")
+                ax.legend(loc="upper right")
+
+    for ax in axes[n_actual:]:
+        ax.axis("off")
+
+    for ax in axes[(nrows - 1) * ncols : nrows * ncols]:
+        if ax.has_data():
+            ax.set_xlabel(xlabel)
+
+    fig.suptitle(title)
+    fig.tight_layout()
+
+    return _save_show(fig, save=save, dpi=dpi, show=show)
 
 def plot_overlay_rnd_lr_slices_subplots(
     results_dict: dict,

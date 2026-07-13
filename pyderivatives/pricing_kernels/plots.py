@@ -368,6 +368,7 @@ def plot_surface(
     save: Optional[Union[str, Path]] = None,
     dpi: int = 200,
     show: bool = True,
+    interactive: bool = False,
 ):
     """
     Generic surface plot for physical density, RND, pricing kernel, or RRA.
@@ -446,6 +447,58 @@ def plot_surface(
         zlabel = rf"$\log$ {zlabel_base}"
     else:
         zlabel = zlabel_base
+    
+    if interactive:
+        import plotly.graph_objects as go
+
+        fig = go.Figure(
+            data=[
+                go.Surface(
+                    x=x_plot,
+                    y=T_plot,
+                    z=Z_plot,
+                    colorscale=cmap,
+                    opacity=alpha,
+                    colorbar=dict(title=zlabel),
+                    hovertemplate=(
+                        f"{xlabel}: %{{x:.6g}}<br>"
+                        "T: %{y:.6g} years<br>"
+                        f"{zlabel}: %{{z:.6g}}"
+                        "<extra></extra>"
+                    ),
+                )
+            ]
+        )
+
+        fig.update_layout(
+            title=title,
+            scene=dict(
+                xaxis_title=xlabel,
+                yaxis_title="Maturity T (years)",
+                zaxis_title=zlabel,
+                camera=dict(
+                    eye=dict(
+                        x=1.75 * np.cos(np.deg2rad(azim)),
+                        y=1.75 * np.sin(np.deg2rad(azim)),
+                        z=1.25,
+                    )
+                ),
+            ),
+            width=950,
+            height=750,
+        )
+
+        if save is not None:
+            save = Path(save)
+            if save.suffix.lower() == ".html":
+                fig.write_html(str(save))
+            else:
+                fig.write_image(str(save), scale=2)
+
+        if show:
+            fig.show()
+
+        return fig
 
     X, T = np.meshgrid(x_plot, T_plot)
 
@@ -1218,9 +1271,18 @@ def plot_rra_panels(result: dict, **kwargs):
 def plot_pqk_multipanel(
     out_dict: Dict[str, dict],
     *,
+    rnd_dict: Optional[dict] = None,
     title: Optional[str] = None,
     n_panels: Optional[int] = None,
     panel_shape: Tuple[int, int] = (2, 4),
+    snap_percentiles_to_traded_strikes: bool = True,
+    target_maturities: Optional[Tuple[float, ...]] = None,
+    maturity_tol: Optional[float] = None,
+    maturity_units: Literal["years", "days"] = "years",
+
+    show_expiry_dates: bool = False,
+    valuation_date: Optional[Union[str, "pd.Timestamp"]] = None,
+
     x_axis: str = "R",
     x_bounds: Optional[Tuple[float, float]] = None,
     truncate_kernel: bool = True,
@@ -1242,37 +1304,41 @@ def plot_pqk_multipanel(
     percentile_alpha_physical: float = 0.45,
     percentile_linewidth_rnd: float = 1.8,
     percentile_linewidth_physical: float = 1.5,
+    snap_maturity_tol: float = 1.0 / 365.0,
     save: Optional[Union[str, Path]] = None,
     dpi: int = 200,
-    legend_loc: str = "upper center",
+    legend_loc: str = "upper right",
     show: bool = True,
 ):
-    """
-    Multi-panel plot of:
-
-        1. Risk-neutral density q
-        2. Physical density p
-        3. Pricing kernel M (secondary axis)
-
-    using the NEW interface.
-
-    IMPORTANT:
-    Percentile markers now share a SINGLE legend entry:
-        - "RND percentiles"
-        - "Physical percentiles"
-
-    instead of one legend entry per percentile line.
-    """
+    import numpy as np
     import matplotlib.pyplot as plt
+
+    if show_expiry_dates:
+        import pandas as pd
 
     if not isinstance(out_dict, dict) or len(out_dict) == 0:
         raise ValueError("out_dict must be a non-empty dictionary.")
 
-    x_axis = _standardize_x_axis(x_axis)
+    def _cdf_prob_at_x(xgrid, cdf_vals, x):
+        xgrid = np.asarray(xgrid, float)
+        cdf_vals = np.asarray(cdf_vals, float)
+    
+        good = np.isfinite(xgrid) & np.isfinite(cdf_vals)
+    
+        if good.sum() < 2:
+            return np.nan
+    
+        return float(
+            np.interp(
+                x,
+                xgrid[good],
+                cdf_vals[good],
+                left=np.nan,
+                right=np.nan,
+            )
+        )
 
-    # =========================================================
-    # Reference grid from first model
-    # =========================================================
+    x_axis = _standardize_x_axis(x_axis)
 
     first_label = next(iter(out_dict))
     first = out_dict[first_label]
@@ -1288,23 +1354,51 @@ def plot_pqk_multipanel(
     cdf_q_key = _cdf_key("rnd", x_axis)
     cdf_p_key = _cdf_key("physical", x_axis)
 
-    # =========================================================
-    # Panel selection
-    # =========================================================
-
     nrows, ncols = panel_shape
     max_panels = nrows * ncols
 
-    if n_panels is None:
-        n_panels = max_panels
+    if target_maturities is not None:
+        targets = np.asarray(target_maturities, dtype=float).ravel()
 
-    n_panels = min(int(n_panels), max_panels, T_ref.size)
+        if maturity_units == "days":
+            targets = targets / 365.0
+            tol_eff = None if maturity_tol is None else float(maturity_tol) / 365.0
+        elif maturity_units == "years":
+            tol_eff = None if maturity_tol is None else float(maturity_tol)
+        else:
+            raise ValueError("maturity_units must be either 'years' or 'days'.")
 
-    idxs = _pick_panel_indices(T_ref, n_panels)
+        idxs = []
 
-    # =========================================================
-    # X bounds
-    # =========================================================
+        for target in targets:
+            if not np.isfinite(target):
+                continue
+
+            j = int(np.argmin(np.abs(T_ref - target)))
+            dist = abs(float(T_ref[j]) - float(target))
+
+            if tol_eff is not None and dist > tol_eff:
+                continue
+
+            if j not in idxs:
+                idxs.append(j)
+
+        if len(idxs) == 0:
+            raise ValueError(
+                "No requested target_maturities were found within maturity_tol."
+            )
+
+        idxs = np.asarray(idxs, dtype=int)
+
+        if idxs.size > max_panels:
+            idxs = idxs[:max_panels]
+
+    else:
+        if n_panels is None:
+            n_panels = max_panels
+
+        n_panels = min(int(n_panels), max_panels, T_ref.size)
+        idxs = _pick_panel_indices(T_ref, n_panels)
 
     if x_bounds is not None:
         lo, hi = sorted(map(float, x_bounds))
@@ -1321,10 +1415,6 @@ def plot_pqk_multipanel(
 
     X_plot = X_ref[xmask_ref]
 
-    # =========================================================
-    # Kernel truncation settings
-    # =========================================================
-
     if truncate_kernel:
         aL, aR = map(float, ptail_alpha)
 
@@ -1334,66 +1424,38 @@ def plot_pqk_multipanel(
             and aL + aR < 1
         ):
             raise ValueError(
-                "ptail_alpha must satisfy "
-                "0 <= left,right < 1 and left+right < 1."
+                "ptail_alpha must satisfy 0 <= left,right < 1 and left+right < 1."
             )
 
-        truncation_measure = str(
-            truncation_measure
-        ).lower().strip()
+        truncation_measure = str(truncation_measure).lower().strip()
 
         if truncation_measure in {"physical", "p"}:
             trunc_kind = "physical"
-
-        elif truncation_measure in {
-            "risk_neutral",
-            "risk-neutral",
-            "rnd",
-            "q",
-        }:
+        elif truncation_measure in {"risk_neutral", "risk-neutral", "rnd", "q"}:
             trunc_kind = "rnd"
-
         else:
             raise ValueError(
-                "truncation_measure must be "
-                "'physical' or 'risk_neutral'."
+                "truncation_measure must be 'physical' or 'risk_neutral'."
             )
-
-    # =========================================================
-    # Kernel y-scale
-    # =========================================================
 
     kernel_yscale = str(kernel_yscale).lower().strip()
 
     if kernel_yscale not in {"linear", "log"}:
-        raise ValueError(
-            "kernel_yscale must be 'linear' or 'log'."
-        )
-
-    # =========================================================
-    # Percentiles
-    # =========================================================
+        raise ValueError("kernel_yscale must be 'linear' or 'log'.")
 
     if show_percentiles:
         probs = np.asarray(percentiles, dtype=float)
 
         if np.any((probs <= 0) | (probs >= 1)):
-            raise ValueError(
-                "percentiles must lie strictly between 0 and 1."
-            )
+            raise ValueError("percentiles must lie strictly between 0 and 1.")
 
         percentile_measures = tuple(
             str(x).lower().strip()
             for x in percentile_measures
         )
-
     else:
         probs = np.asarray([], dtype=float)
         percentile_measures = tuple()
-
-    # =========================================================
-    # Interpolation helper
-    # =========================================================
 
     def _interp_row_to_ref(X, row):
         X = np.asarray(X, float).ravel()
@@ -1402,11 +1464,7 @@ def plot_pqk_multipanel(
         good = np.isfinite(X) & np.isfinite(row)
 
         if good.sum() < 2:
-            return np.full_like(
-                X_ref,
-                np.nan,
-                dtype=float,
-            )
+            return np.full_like(X_ref, np.nan, dtype=float)
 
         return np.interp(
             X_ref,
@@ -1416,9 +1474,152 @@ def plot_pqk_multipanel(
             right=np.nan,
         )
 
-    # =========================================================
-    # Figure
-    # =========================================================
+    def _format_xmark(xmark):
+        if x_axis.lower() in {"k", "strike"}:
+            return f"K={xmark:.2f}"
+        elif x_axis.lower() in {"r"}:
+            return f"R={xmark:.4f}"
+        elif x_axis.lower() in {"lr", "logreturn", "log_return"}:
+            return f"lr={xmark:.4f}"
+        return f"x={xmark:.4f}"
+
+    def _format_panel_title(T_years):
+        days = float(T_years) * 365.0
+
+        if days < 1:
+            t_label = "Same day"
+        elif abs(days - round(days)) < 0.05:
+            d_int = int(round(days))
+            t_label = f"T={d_int} day" if d_int == 1 else f"T={d_int} days"
+        else:
+            t_label = f"T={days:.1f} days"
+
+        if show_expiry_dates:
+            if valuation_date is None:
+                raise ValueError(
+                    "valuation_date must be supplied when show_expiry_dates=True."
+                )
+
+            val_date = pd.Timestamp(valuation_date)
+            expiry_date = val_date + pd.to_timedelta(days, unit="D")
+            expiry_str = expiry_date.strftime("%Y-%m-%d")
+
+            return f"{expiry_str} ({t_label})"
+
+        return t_label
+
+    def _get_single_rnd_day():
+        if rnd_dict is None:
+            return None
+    
+        if not isinstance(rnd_dict, dict) or len(rnd_dict) == 0:
+            return None
+    
+        # Case 1: user passed one RND result directly:
+        # rnd_dict = RND_dict[pd.Timestamp("2026-05-22")]
+        if "day" in rnd_dict:
+            return rnd_dict["day"]
+    
+        # Case 2: user passed full date-keyed RND_dict with one date
+        if len(rnd_dict) == 1:
+            date_key = next(iter(rnd_dict))
+            entry = rnd_dict[date_key]
+    
+            if isinstance(entry, dict) and "day" in entry:
+                return entry["day"]
+    
+            raise ValueError("rnd_dict entry must contain key 'day'.")
+    
+        # Case 3: user passed full date-keyed RND_dict with many dates
+        if valuation_date is None:
+            raise ValueError(
+                "rnd_dict has multiple date keys, so valuation_date must be supplied."
+            )
+    
+        import pandas as pd
+    
+        val_date = pd.Timestamp(valuation_date).normalize()
+    
+        normalized_lookup = {}
+    
+        for k in rnd_dict.keys():
+            try:
+                k_date = pd.Timestamp(k).normalize()
+            except Exception:
+                continue
+    
+            normalized_lookup[k_date] = k
+    
+        if val_date not in normalized_lookup:
+            raise ValueError(
+                f"valuation_date {val_date.date()} was not found in rnd_dict."
+            )
+    
+        date_key = normalized_lookup[val_date]
+        entry = rnd_dict[date_key]
+    
+        if not isinstance(entry, dict) or "day" not in entry:
+            raise ValueError("rnd_dict[valuation_date] must contain key 'day'.")
+    
+        return entry["day"]
+
+    rnd_day = _get_single_rnd_day()
+
+    def _snap_to_traded_x(xmark, T_target_ref):
+        if rnd_day is None or not np.isfinite(xmark):
+            return xmark
+
+        if isinstance(rnd_day, dict):
+            K_obs = np.asarray(rnd_day["K_obs"], float).ravel()
+            T_obs = np.asarray(rnd_day["T_obs"], float).ravel()
+        else:
+            K_obs = np.asarray(rnd_day.K_obs, float).ravel()
+            T_obs = np.asarray(rnd_day.T_obs, float).ravel()
+
+        valid = (
+            np.isfinite(K_obs)
+            & np.isfinite(T_obs)
+            & (K_obs > 0)
+            & (T_obs >= 0)
+        )
+
+        K_obs = K_obs[valid]
+        T_obs = T_obs[valid]
+
+        if K_obs.size == 0:
+            return xmark
+
+        tmask = np.abs(T_obs - float(T_target_ref)) <= float(snap_maturity_tol)
+
+        if np.any(tmask):
+            K_use = K_obs[tmask]
+        else:
+            K_use = K_obs
+
+        K_snap = float(K_use[np.argmin(np.abs(K_use - xmark))])
+
+        if x_axis.lower() in {"k", "strike"}:
+            return K_snap
+
+        S0 = first.get("S0", None)
+
+        if S0 is None:
+            S0 = getattr(rnd_day, "S0", None)
+        if S0 is None:
+            S0 = getattr(rnd_day, "S0", None)
+
+        if S0 is None:
+            return K_snap
+
+        S0 = float(S0)
+
+        if x_axis.lower() in {"r"}:
+            return K_snap / S0
+
+        if x_axis.lower() in {"lr", "logreturn", "log_return"}:
+            return float(np.log(K_snap / S0))
+
+        return K_snap
 
     fig, axes = plt.subplots(
         nrows,
@@ -1429,119 +1630,55 @@ def plot_pqk_multipanel(
 
     axes = np.asarray(axes).ravel()
 
-    ax2_list = []
-
-    # Tracks whether a legend item has already been used.
-    legend_seen = set()
-
-    # =========================================================
-    # Main loop
-    # =========================================================
-
     for k, j_ref in enumerate(idxs):
-
         ax = axes[k]
         ax2 = ax.twinx()
 
-        ax2_list.append(ax2)
-
-        # -----------------------------------------------------
-        # Plot each model
-        # -----------------------------------------------------
+        local_legend_seen = set()
+        T_target_ref = float(T_ref[j_ref])
 
         for model_label, result in out_dict.items():
-
             T = _as_1d(result["T_grid"])
-            X, _ = _get_plot_x_grid(
-                result,
-                x_axis=x_axis,
-            )
+            X, _ = _get_plot_x_grid(result, x_axis=x_axis)
 
-            q_surface = np.asarray(
-                result[q_key],
-                dtype=float,
-            )
+            q_surface = np.asarray(result[q_key], dtype=float)
+            p_surface = np.asarray(result[p_key], dtype=float)
+            M_surface = np.asarray(result[M_key], dtype=float)
 
-            p_surface = np.asarray(
-                result[p_key],
-                dtype=float,
-            )
-
-            M_surface = np.asarray(
-                result[M_key],
-                dtype=float,
-            )
-
-            j = int(
-                np.argmin(np.abs(T - T_ref[j_ref]))
-            )
+            j = int(np.argmin(np.abs(T - T_target_ref)))
 
             same_x_grid = (
                 X.shape == X_ref.shape
-                and np.allclose(
-                    X,
-                    X_ref,
-                    equal_nan=True,
-                )
+                and np.allclose(X, X_ref, equal_nan=True)
             )
 
-            # -------------------------------------------------
-            # Align grids
-            # -------------------------------------------------
-
             if same_x_grid:
-
                 q_ref = q_surface[j, :]
                 p_ref = p_surface[j, :]
                 M_ref = M_surface[j, :]
-
             else:
-
-                q_ref = _interp_row_to_ref(
-                    X,
-                    q_surface[j, :],
-                )
-
-                p_ref = _interp_row_to_ref(
-                    X,
-                    p_surface[j, :],
-                )
-
-                M_ref = _interp_row_to_ref(
-                    X,
-                    M_surface[j, :],
-                )
+                q_ref = _interp_row_to_ref(X, q_surface[j, :])
+                p_ref = _interp_row_to_ref(X, p_surface[j, :])
+                M_ref = _interp_row_to_ref(X, M_surface[j, :])
 
             q_plot = q_ref[xmask_ref]
             p_plot = p_ref[xmask_ref]
             M_plot = M_ref[xmask_ref]
 
-            # -------------------------------------------------
-            # q density
-            # -------------------------------------------------
+            q_legend = f"{q_label} ({model_label})"
+            p_legend = f"{p_label} ({model_label})"
+            m_legend = f"$M$ ({model_label})"
 
             q_line, = ax.plot(
                 X_plot,
                 q_plot,
                 linewidth=lw_density + 0.2,
                 alpha=alpha_density,
-                label=(
-                    f"{q_label} ({model_label})"
-                    if f"{q_label} ({model_label})"
-                    not in legend_seen
-                    else "_nolegend_"
-                ),
+                label=q_legend if q_legend not in local_legend_seen else "_nolegend_",
             )
 
-            legend_seen.add(
-                f"{q_label} ({model_label})"
-            )
-
+            local_legend_seen.add(q_legend)
             color = q_line.get_color()
-
-            # -------------------------------------------------
-            # p density
-            # -------------------------------------------------
 
             ax.plot(
                 X_plot,
@@ -1550,42 +1687,15 @@ def plot_pqk_multipanel(
                 alpha=0.72,
                 color=color,
                 linestyle="-",
-                label=(
-                    f"{p_label} ({model_label})"
-                    if f"{p_label} ({model_label})"
-                    not in legend_seen
-                    else "_nolegend_"
-                ),
+                label=p_legend if p_legend not in local_legend_seen else "_nolegend_",
             )
 
-            legend_seen.add(
-                f"{p_label} ({model_label})"
-            )
-
-            # -------------------------------------------------
-            # Percentile markers
-            # -------------------------------------------------
+            local_legend_seen.add(p_legend)
 
             if show_percentiles:
-
-                # =============================================
-                # RND percentiles
-                # =============================================
-
-                if any(
-                    m in percentile_measures
-                    for m in {
-                        "rnd",
-                        "q",
-                        "risk_neutral",
-                    }
-                ):
-
+                if any(m in percentile_measures for m in {"rnd", "q", "risk_neutral"}):
                     if cdf_q_key in result:
-                        cdf_q_surface = np.asarray(
-                            result[cdf_q_key],
-                            dtype=float,
-                        )
+                        cdf_q_surface = np.asarray(result[cdf_q_key], dtype=float)
                     else:
                         cdf_q_surface = _get_cdf_surface(
                             result,
@@ -1596,67 +1706,38 @@ def plot_pqk_multipanel(
                     cdf_q_ref = (
                         cdf_q_surface[j, :]
                         if same_x_grid
-                        else _interp_row_to_ref(
-                            X,
-                            cdf_q_surface[j, :],
-                        )
+                        else _interp_row_to_ref(X, cdf_q_surface[j, :])
                     )
 
-                    q_marks = _quantiles_from_cdf(
-                        X_ref,
-                        cdf_q_ref,
-                        probs,
-                    )
-
-                    for xmark in q_marks:
-
-                        if np.isfinite(xmark):
-
+                    q_marks = _quantiles_from_cdf(X_ref, cdf_q_ref, probs)
+                    
+                    for prob, xmark_raw in zip(probs, q_marks):
+                        if np.isfinite(xmark_raw):
+                    
+                            if snap_percentiles_to_traded_strikes:
+                                xmark = _snap_to_traded_x(xmark_raw, T_target_ref)
+                                label_prob = _cdf_prob_at_x(X_ref, cdf_q_ref, xmark)
+                            else:
+                                xmark = xmark_raw
+                                label_prob = prob
+                    
                             legend_label = (
-                                "RND percentiles"
+                                f"RND p{100 * label_prob:.1f}: "
+                                f"{_format_xmark(xmark)}"
                             )
-
+                    
                             ax.axvline(
                                 xmark,
                                 color=color,
-                                linestyle=(
-                                    percentile_linestyle_rnd
-                                ),
-                                alpha=(
-                                    percentile_alpha_rnd
-                                ),
-                                linewidth=(
-                                    percentile_linewidth_rnd
-                                ),
-                                label=(
-                                    legend_label
-                                    if legend_label
-                                    not in legend_seen
-                                    else "_nolegend_"
-                                ),
+                                linestyle=percentile_linestyle_rnd,
+                                alpha=percentile_alpha_rnd,
+                                linewidth=percentile_linewidth_rnd,
+                                label=legend_label,
                             )
 
-                            legend_seen.add(
-                                legend_label
-                            )
-
-                # =============================================
-                # Physical percentiles
-                # =============================================
-
-                if any(
-                    m in percentile_measures
-                    for m in {
-                        "physical",
-                        "p",
-                    }
-                ):
-
+                if any(m in percentile_measures for m in {"physical", "p"}):
                     if cdf_p_key in result:
-                        cdf_p_surface = np.asarray(
-                            result[cdf_p_key],
-                            dtype=float,
-                        )
+                        cdf_p_surface = np.asarray(result[cdf_p_key], dtype=float)
                     else:
                         cdf_p_surface = _get_cdf_surface(
                             result,
@@ -1667,63 +1748,39 @@ def plot_pqk_multipanel(
                     cdf_p_ref = (
                         cdf_p_surface[j, :]
                         if same_x_grid
-                        else _interp_row_to_ref(
-                            X,
-                            cdf_p_surface[j, :],
-                        )
+                        else _interp_row_to_ref(X, cdf_p_surface[j, :])
                     )
 
-                    p_marks = _quantiles_from_cdf(
-                        X_ref,
-                        cdf_p_ref,
-                        probs,
-                    )
+                    p_marks = _quantiles_from_cdf(X_ref, cdf_p_ref, probs)
 
-                    for xmark in p_marks:
-
-                        if np.isfinite(xmark):
-
+                    for prob, xmark_raw in zip(probs, p_marks):
+                        if np.isfinite(xmark_raw):
+                    
+                            if snap_percentiles_to_traded_strikes:
+                                xmark = _snap_to_traded_x(xmark_raw, T_target_ref)
+                                label_prob = _cdf_prob_at_x(X_ref, cdf_p_ref, xmark)
+                            else:
+                                xmark = xmark_raw
+                                label_prob = prob
+                    
                             legend_label = (
-                                "Physical percentiles"
+                                f"Physical p{100 * label_prob:.1f}: "
+                                f"{_format_xmark(xmark)}"
                             )
-
+                    
                             ax.axvline(
                                 xmark,
                                 color=color,
-                                linestyle=(
-                                    percentile_linestyle_physical
-                                ),
-                                alpha=(
-                                    percentile_alpha_physical
-                                ),
-                                linewidth=(
-                                    percentile_linewidth_physical
-                                ),
-                                label=(
-                                    legend_label
-                                    if legend_label
-                                    not in legend_seen
-                                    else "_nolegend_"
-                                ),
+                                linestyle=percentile_linestyle_physical,
+                                alpha=percentile_alpha_physical,
+                                linewidth=percentile_linewidth_physical,
+                                label=legend_label,
                             )
-
-                            legend_seen.add(
-                                legend_label
-                            )
-
-            # -------------------------------------------------
-            # Kernel truncation
-            # -------------------------------------------------
 
             if truncate_kernel:
-
                 if trunc_kind == "physical":
-
                     F_surface = (
-                        np.asarray(
-                            result[cdf_p_key],
-                            dtype=float,
-                        )
+                        np.asarray(result[cdf_p_key], dtype=float)
                         if cdf_p_key in result
                         else _get_cdf_surface(
                             result,
@@ -1731,14 +1788,9 @@ def plot_pqk_multipanel(
                             x_axis=x_axis,
                         )
                     )
-
                 else:
-
                     F_surface = (
-                        np.asarray(
-                            result[cdf_q_key],
-                            dtype=float,
-                        )
+                        np.asarray(result[cdf_q_key], dtype=float)
                         if cdf_q_key in result
                         else _get_cdf_surface(
                             result,
@@ -1750,10 +1802,7 @@ def plot_pqk_multipanel(
                 F_ref = (
                     F_surface[j, :]
                     if same_x_grid
-                    else _interp_row_to_ref(
-                        X,
-                        F_surface[j, :],
-                    )
+                    else _interp_row_to_ref(X, F_surface[j, :])
                 )
 
                 F_plot = F_ref[xmask_ref]
@@ -1764,34 +1813,18 @@ def plot_pqk_multipanel(
                     & (F_plot >= aL)
                     & (F_plot <= 1.0 - aR)
                 )
-
             else:
-
                 kmask = np.isfinite(M_plot)
 
             Xk = X_plot[kmask]
             Mk = M_plot[kmask]
 
             if kernel_yscale == "log":
-
-                good = (
-                    np.isfinite(Mk)
-                    & (Mk > 0)
-                )
-
+                good = np.isfinite(Mk) & (Mk > 0)
                 Xk = Xk[good]
-
-                Mk = np.maximum(
-                    Mk[good],
-                    kernel_log_eps,
-                )
-
-            # -------------------------------------------------
-            # Pricing kernel
-            # -------------------------------------------------
+                Mk = np.maximum(Mk[good], kernel_log_eps)
 
             if Xk.size > 1:
-
                 ax2.plot(
                     Xk,
                     Mk,
@@ -1799,26 +1832,12 @@ def plot_pqk_multipanel(
                     linewidth=lw_kernel,
                     alpha=alpha_kernel,
                     color=color,
-                    label=(
-                        f"$M$ ({model_label})"
-                        if f"$M$ ({model_label})"
-                        not in legend_seen
-                        else "_nolegend_"
-                    ),
+                    label=m_legend if m_legend not in local_legend_seen else "_nolegend_",
                 )
 
-                legend_seen.add(
-                    f"$M$ ({model_label})"
-                )
+                local_legend_seen.add(m_legend)
 
-        # -----------------------------------------------------
-        # Axis formatting
-        # -----------------------------------------------------
-
-        ax.set_title(
-            f"T ≈ {365 * T_ref[j_ref]:.1f}d"
-        )
-
+        ax.set_title(_format_panel_title(T_target_ref))
         ax.grid(True, alpha=0.25)
 
         if k % ncols == 0:
@@ -1833,53 +1852,33 @@ def plot_pqk_multipanel(
         ax2.set_yscale(kernel_yscale)
 
         if x_bounds is not None:
-            ax.set_xlim(
-                X_plot[0],
-                X_plot[-1],
-            )
+            ax.set_xlim(X_plot[0], X_plot[-1])
 
-    # =========================================================
-    # Hide unused axes
-    # =========================================================
+        h1, l1 = ax.get_legend_handles_labels()
+        h2, l2 = ax2.get_legend_handles_labels()
+
+        handles = h1 + h2
+        labels = l1 + l2
+
+        unique = {}
+
+        for h, lab in zip(handles, labels):
+            if lab != "_nolegend_" and lab not in unique:
+                unique[lab] = h
+
+        ax.legend(
+            unique.values(),
+            unique.keys(),
+            loc=legend_loc,
+            fontsize=8,
+            frameon=True,
+        )
 
     for k in range(len(idxs), axes.size):
         axes[k].axis("off")
 
-    # =========================================================
-    # Global legend
-    # =========================================================
-
-    handles, labels = [], []
-
-    h1, l1 = axes[0].get_legend_handles_labels()
-
-    handles.extend(h1)
-    labels.extend(l1)
-
-    if ax2_list:
-        h2, l2 = ax2_list[0].get_legend_handles_labels()
-        handles.extend(h2)
-        labels.extend(l2)
-
-    # Remove duplicate legend entries.
-    unique = {}
-
-    for h, l in zip(handles, labels):
-        if l not in unique and l != "_nolegend_":
-            unique[l] = h
-
-    handles = list(unique.values())
-    labels = list(unique.keys())
-
-    # =========================================================
-    # Title
-    # =========================================================
-
     if title is None:
-        title = (
-            "Risk-Neutral Density, "
-            "Physical Density, and Pricing Kernel"
-        )
+        title = "Risk-Neutral Density, Physical Density, and Pricing Kernel"
 
     fig.suptitle(
         title,
@@ -1887,23 +1886,8 @@ def plot_pqk_multipanel(
         fontsize=14,
     )
 
-    # =========================================================
-    # Global legend
-    # =========================================================
-
-    fig.legend(
-        handles,
-        labels,
-        loc=legend_loc,
-        bbox_to_anchor=(0.5, 0.965),
-        ncol=min(5, max(1, len(labels))),
-        frameon=False,
-        handlelength=2.8,
-        columnspacing=1.4,
-    )
-
     fig.subplots_adjust(
-        top=0.88,
+        top=0.90,
         wspace=0.28,
         hspace=0.34,
     )
@@ -1917,6 +1901,152 @@ def plot_pqk_multipanel(
 
     return fig
 
+def plot_pit_calibration_panels(
+    model,
+    *,
+    n_panels: int = 6,
+    bins: int = 20,
+    panel_shape: tuple[int, int] | None = None,
+    title: str | None = None,
+    save=None,
+    dpi: int = 200,
+    show: bool = True,
+):
+    """
+    Plot PIT histogram overlaid with the fitted calibration density.
+
+    Works for:
+        - BetaCalibration
+        - NonparametricCalibration
+
+    Requires a fitted model with:
+        model.fit_history_by_T_
+        model.models_by_T_
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from pathlib import Path
+    from scipy.stats import beta as beta_dist
+    from scipy.stats import norm
+
+    if not getattr(model, "is_fitted_", False):
+        raise RuntimeError("Model must be fitted before plotting PIT calibration panels.")
+
+    Ts = sorted(model.models_by_T_.keys())
+    if len(Ts) == 0:
+        raise RuntimeError("No fitted maturity models found.")
+
+    n_panels = min(int(n_panels), len(Ts))
+
+    idxs = np.unique(
+        np.linspace(0, len(Ts) - 1, n_panels).round().astype(int)
+    )
+    Ts_plot = [Ts[i] for i in idxs]
+
+    if panel_shape is None:
+        ncols = min(3, len(Ts_plot))
+        nrows = int(np.ceil(len(Ts_plot) / ncols))
+    else:
+        nrows, ncols = panel_shape
+
+    fig, axes = plt.subplots(
+        nrows=nrows,
+        ncols=ncols,
+        figsize=(5.2 * ncols, 3.8 * nrows),
+        sharex=True,
+        sharey=False,
+    )
+
+    axes = np.asarray(axes).ravel()
+
+    eps = float(getattr(model, "eps", 1e-10))
+    u_grid = np.linspace(eps, 1.0 - eps, 1000)
+
+    for ax, T in zip(axes, Ts_plot):
+        hist = model.fit_history_by_T_.get(T)
+
+        if hist is None or hist.empty:
+            ax.set_title(f"T ≈ {365*T:.0f}d: no PITs")
+            ax.axis("off")
+            continue
+
+        u = np.asarray(hist["pit"], dtype=float)
+        u = u[np.isfinite(u)]
+        u = np.clip(u, eps, 1.0 - eps)
+
+        fitted = model.models_by_T_[T]
+
+        ax.hist(
+            u,
+            bins=bins,
+            range=(0.0, 1.0),
+            density=True,
+            alpha=0.35,
+            edgecolor="black",
+            label="PIT histogram",
+        )
+
+        method = str(getattr(model, "method_name", "")).lower()
+
+        if hasattr(fitted, "a") and hasattr(fitted, "b"):
+            g = beta_dist.pdf(u_grid, fitted.a, fitted.b)
+            fitted_label = rf"Beta fit: $a={fitted.a:.3g}$, $b={fitted.b:.3g}$"
+
+        elif hasattr(fitted, "z_grid") and hasattr(fitted, "h_grid"):
+            z = norm.ppf(u_grid)
+            h_z = np.interp(
+                z,
+                fitted.z_grid,
+                fitted.h_grid,
+                left=np.nan,
+                right=np.nan,
+            )
+            phi_z = norm.pdf(z)
+            g = h_z / np.maximum(phi_z, eps)
+            g = np.where(np.isfinite(g) & (g >= 0), g, np.nan)
+
+            fitted_label = (
+                f"KDE fit: h={fitted.bandwidth:.3g}, "
+                f"{fitted.bandwidth_method}"
+            )
+
+        else:
+            raise TypeError(
+                "Unsupported fitted model. Expected beta parameters "
+                "(a,b) or nonparametric KDE fields (z_grid,h_grid)."
+            )
+
+        ax.plot(u_grid, g, linewidth=2.2, label=fitted_label)
+        ax.axhline(1.0, linestyle="--", linewidth=1.2, label="Uniform benchmark")
+
+        ax.set_title(f"T ≈ {365*T:.0f}d | n={len(u)}")
+        ax.set_xlim(0.0, 1.0)
+        ax.set_xlabel("PIT value")
+        ax.set_ylabel("Density")
+        ax.grid(True, alpha=0.25)
+        ax.legend(loc="best")
+
+    for ax in axes[len(Ts_plot):]:
+        ax.axis("off")
+
+    if title is None:
+        title = f"PIT Calibration Density Panels — {getattr(model, 'method_name', 'model')}"
+
+    fig.suptitle(title)
+    fig.tight_layout()
+
+    if save is not None:
+        save = Path(save)
+        save.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save, dpi=dpi, bbox_inches="tight")
+        print(f"[saved] {save}")
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return fig
 
 # Backward-compatible alias for your old function name.
 def M_Q_K_multipanel_multi(*args, **kwargs):

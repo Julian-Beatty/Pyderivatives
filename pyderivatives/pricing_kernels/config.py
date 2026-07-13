@@ -1,59 +1,60 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, Tuple, Dict, Any
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
 
 # ============================================================
-# Exponential-polynomial kernel specification
+# Transform specifications
 # ============================================================
 
 @dataclass(frozen=True)
 class ThetaSpec:
     """
-    Exponential-polynomial pricing kernel specification.
+    Specification for the flexible exponential-polynomial pricing kernel.
 
-    Kernel:
+    Kernel form:
 
         M(r, sigma)
-        =
+            =
         exp(
-            sum_i sum_k theta_{i,k} * r^i * sigma^{-k}
+            sum_i sum_k theta_{i,k} r^i sigma^{-k}
         )
 
     Parameters
     ----------
     N:
-        Highest polynomial order in return r.
+        Highest polynomial order in log return r.
 
     Ksig:
-        Highest sigma interaction order.
+        Highest inverse-volatility interaction order.
+
+    bounds:
+        Optional lower and upper parameter bounds.
     """
     N: int = 2
     Ksig: int = 1
     bounds: Optional[Tuple[np.ndarray, np.ndarray]] = None
 
 
-# ============================================================
-# Conditional-risk kernel specification
-# ============================================================
-
 @dataclass(frozen=True)
-class ConditionalRiskSpec:
+class ExponentialSpec:
     """
-    Conditional-risk pricing kernel specification.
+    Specification for the volatility-conditioned exponential pricing kernel.
 
-    Kernel:
+    Kernel form:
 
-        M(r,sigma)
-        =
+        M(r, sigma)
+            =
         exp(
             delta
             +
-            sum_i c_i / sigma^(b i) * r^i
+            sum_i c_i sigma^{-(b i)} r^i
         )
+
+    The intercept delta is solved internally so that E_Q[M] = 1.
     """
     N: int = 2
 
@@ -63,12 +64,13 @@ class ConditionalRiskSpec:
     enforce_convexity: bool = False
 
 
-# ============================================================
-# Beta calibration specification
-# ============================================================
-
 @dataclass(frozen=True)
 class BetaCalibrationSpec:
+    """
+    Specification for beta PIT calibration.
+
+    The PIT values u_t = F_Q,t(r_t) are modeled as beta distributed.
+    """
     a0: float = 1.0
     b0: float = 1.0
 
@@ -76,37 +78,28 @@ class BetaCalibrationSpec:
     b_bounds: Tuple[float, float] = (1e-3, 100.0)
 
     @property
-    def x0(self):
+    def x0(self) -> np.ndarray:
         return np.array([self.a0, self.b0], dtype=float)
 
-
-# ============================================================
-# Nonparametric calibration specification
-# ============================================================
 
 @dataclass(frozen=True)
 class NonparametricCalibrationSpec:
     """
-    Nonparametric calibration specification.
+    Specification for nonparametric PIT calibration.
 
     Method:
-        1. Compute PIT values u_t = F_Q,t(r_t^realized).
-        2. Transform z_t = Phi^{-1}(u_t).
-        3. Estimate h(z) nonparametrically using Gaussian KDE.
-        4. Define C(u) = H(Phi^{-1}(u)).
+        1. Compute PIT values u_t = F_Q,t(r_t).
+        2. Transform to normal scores z_t = Phi^{-1}(u_t).
+        3. Estimate the density h(z) by Gaussian KDE.
+        4. Define the calibration map C(u) = H(Phi^{-1}(u)).
 
     Density transformation:
 
-        f_P(x) = f_Q(x) * h(z) / phi(z),
+        f_P(x)
+            =
+        f_Q(x) h(z) / phi(z),
 
-    where:
-
-        z = Phi^{-1}(F_Q(x)).
-
-    bandwidth:
-        "silverman" -> 1.06 * std(z) * n^(-1/5)
-        "scott"     -> std(z) * n^(-1/5)
-        float       -> manual bandwidth in z-space
+    where z = Phi^{-1}(F_Q(x)).
     """
     bandwidth: str | float = "silverman"
 
@@ -118,11 +111,14 @@ class NonparametricCalibrationSpec:
 
 
 # ============================================================
-# Bootstrap specification
+# Runtime and infrastructure specifications
 # ============================================================
 
 @dataclass(frozen=True)
 class BootstrapSpec:
+    """
+    Bootstrap settings for transformed physical-density outputs.
+    """
     enabled: bool = False
 
     B: int = 500
@@ -135,55 +131,41 @@ class BootstrapSpec:
     keep_draws: bool = False
 
 
-# ============================================================
-# Cache specification
-# ============================================================
-
 @dataclass(frozen=True)
 class CacheSpec:
     """
-    Optional disk cache for fitted models or transformed outputs.
+    Optional disk-cache settings for fitted models and transformed outputs.
     """
     enabled: bool = False
 
     folder: str = "measure_transform_cache"
 
-    cache_fit: bool = True
+    cache_fit: bool = False
     cache_transform: bool = False
 
     dataset_tag: str = "default"
 
 
-# ============================================================
-# Input dictionary key specification
-# ============================================================
-
 @dataclass(frozen=True)
 class KeySpec:
     """
-    Naming convention for RND surface dictionaries.
+    Key names used to read RND dictionaries.
+
+    This allows the transform layer to work with output dictionaries that
+    use slightly different naming conventions.
     """
 
-    # x-axis grid
     x_grid_key: str = "grid_lr"
-
-    # density surface on log-return grid
     pdf_surface_key: str = "rnd_lr_surface"
-
-    # CDF surface
     cdf_surface_key: str = "rnd_cdf_surface"
-
-    # maturity grid
     T_grid_key: str = "T_grid"
 
-    # spot aliases
     spot_keys: Tuple[str, ...] = (
         "S0",
         "spot",
         "s0",
     )
 
-    # volatility aliases
     sigma_keys: Tuple[str, ...] = (
         "atm_vol",
         "sigma",
@@ -192,13 +174,15 @@ class KeySpec:
 
 
 # ============================================================
-# Fit diagnostics
+# Diagnostics
 # ============================================================
 
 @dataclass
 class FitDiagnostics:
+    """
+    Summary of a single maturity-specific transform fit.
+    """
     maturity: float
-
     method: str
 
     n_total: int
@@ -209,7 +193,6 @@ class FitDiagnostics:
     loss_name: str = "not_applicable"
 
     status: str = "unknown"
-
     message: str = ""
 
     params: Dict[str, Any] = field(default_factory=dict)

@@ -7,22 +7,27 @@ name = "pyderivatives"
 version = "0.1.0"
 description = "Option/pricing-kernel utilities and derivatives research toolkit"
 readme = { text = "PyDerivatives", content-type = "text/plain" }
-requires-python = ">=3.10"
+requires-python = ">=3.11,<3.13"
 license = { text = "MIT" }
 authors = [{ name = "Julian Beatty" }]
+
 dependencies = [
-  "numpy",
-  "pandas",
-  "scipy",
-  "matplotlib",
-  "cvxpy",
-  "networkx",
+  "numpy>=2.0",
+  "pandas>=3.0",
+  "scipy>=1.14",
+  "matplotlib>=3.9",
+  "cvxpy>=1.5",
+  "networkx>=3.3",
   "pycwt",
-  "statsmodels",
+  "statsmodels>=0.14.6",
   "pyarrow>=13",
   "ecos",
+  "plotly>=6.0",
+"requests",
+  "kaleido",
+  "arch>=7.0",
+	
 ]
-
 # ----------------------------------
 # FIND ALL PACKAGES (incl. demodata)
 # ----------------------------------

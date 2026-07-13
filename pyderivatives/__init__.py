@@ -1,91 +1,150 @@
 # pyderivatives/__init__.py
-# Top-level convenience API for your project.
-# Keep imports explicit to avoid circular-import hell.
-# Demo data
-from . import demodata
 
-# -------------------------
-# yieldcurve (your current exports)
-# -------------------------
+# =========================================================
+# Core packages
+# =========================================================
+
+from . import demodata
 from . import yieldcurve
+from . import global_pricer
+from . import option_market_standardizer
+from . import arbitrage_repair
+from . import post_estimation
+from . import pricing_kernel
+from . import density_evaluation
+from . import dealer_positioning
+
+# =========================================================
+# Yield curve
+# =========================================================
+
 from .yieldcurve.core import create_yield_curve
 from .yieldcurve.build_yield_curve import build_yield_dataframe
-from .yieldcurve.plotting_functions import plot_yield_curve, plot_yield_surface
+from .yieldcurve.plotting_functions import (
+    plot_yield_curve,
+    plot_yield_surface,
+)
 
-# -------------------------
-# conditional_pricing_kernel
-# -------------------------
-# from . import conditional_pricing_kernel  # <-- old
 
-# from .conditional_pricing_kernel.config import *
-# from .conditional_pricing_kernel.data import *
-# from .conditional_pricing_kernel.eval import *
-# from .conditional_pricing_kernel.fit import *
-# from .conditional_pricing_kernel.kernel import *
-# from .conditional_pricing_kernel.moments import *
-# from .conditional_pricing_kernel.bootstrap import *
-# from .conditional_pricing_kernel.cache import *
-# from .conditional_pricing_kernel.panel_plots import *
-# from .conditional_pricing_kernel.eval import evaluate_anchor_surfaces_with_theta_master
+# =========================================================
+# Global pricer
+# =========================================================
 
-# (optional but common)
-# -------------------------
-# global_pricer
-# -------------------------
-from . import global_pricer
 from .global_pricer.global_surface_pricer import GlobalSurfacePricer
 from .global_pricer.plotting import surfaces, panels
+from .global_pricer.io import make_day_from_df
 
-# (optional common postprocess configs you use a lot)
 from .global_pricer.postprocess.rnd import SafetyClipConfig
 from .global_pricer.postprocess.iv import IVConfig
 
-# -------------------------
-# option_market_standardizer
-# -------------------------
-from . import option_market_standardizer
+
+# =========================================================
+# Option market standardizer
+# =========================================================
+
 from .option_market_standardizer import OptionMarketStandardizer
-from .option_market_standardizer.utils import summarize_put_call_parity_diff
-from .option_market_standardizer.core import put_call_parity
-from .option_market_standardizer.registry import VENDOR_REGISTRY
 
-#
-#
-from .global_pricer.io import make_day_from_df
+from .option_market_standardizer.utils import (
+    summarize_put_call_parity_diff,
+)
 
-#
-# -------------------------
-# arbitrage_repair
-# -------------------------
-from . import arbitrage_repair
-from .arbitrage_repair import RepairConfig, CallSurfaceArbRepair, repair_arb
-###Post estimation
-from . import post_estimation
-from .post_estimation.multiplots_error_diagn import *
-from .post_estimation.quantilereg import*
-from .post_estimation.TVP_QSVAR import*
-from .post_estimation.wavelets import*
-from .post_estimation.tex import*
-from .post_estimation.utils import*
-from .post_estimation.generalizedquantilesreg import*
+from .option_market_standardizer.core import (
+    put_call_parity,
+)
+
+from .option_market_standardizer.registry import (
+    VENDOR_REGISTRY,
+)
 
 
+# =========================================================
+# Arbitrage repair
+# =========================================================
+
+from .arbitrage_repair import (
+    RepairConfig,
+    CallSurfaceArbRepair,
+    repair_arb,
+)
+
+from .arbitrage_repair import (
+    plot_surface,
+    plot_panels,
+    plot_perturb,
+    plot_term,
+    plot_heatmap,
+)
 
 
-# (optional) also export plotters at the top-level convenience API
-from .arbitrage_repair import plot_surface, plot_panels, plot_perturb, plot_term, plot_heatmap
+# =========================================================
+# Density evaluation
+# =========================================================
+from .density_backtesting import *
 
-# -------------------------
-# pricing_kernels
-# -------------------------
-from . import pricing_kernels
+# from .density_evaluation import (
 
-from .pricing_kernels import (
+#     # Evaluators
+#     ForecastDensity,
+#     DensityEvaluationResults,
+#     OptionImpliedDensityEvaluator,
+#     HistoricalKDEDensityEvaluator,
+#     GARCHDensityEvaluator,
+#     RNDDensityEvaluator,
+
+#     # Utilities
+#     get_fit_dates,
+#     load_forecast_part,
+#     merge_forecast_parts,
+
+#     # PIT tests
+#     pit_summary,
+#     pit_uniformity_test,
+#     z_diagnostics,
+#     berkowitz_lr3_test,
+#     evaluate_pit_tests,
+#     autocorrelation_moment_tests,
+
+#     # Hit tests
+#     hit_test,
+#     standard_hit_tests,
+#     patton_hit_test,
+#     standard_patton_hit_tests,
+#     patton_union_hit_test,
+#     paper_hit_test_table,
+#     paper_hit_test_pvalue_table,
+
+#     # Model comparison
+#     diebold_mariano_test,
+#     pairwise_dm_table,
+
+#     # Plots
+#     plot_pit_histogram,
+#     plot_pit_qq,
+#     plot_cumulative_log_scores,
+#     plot_forecast_density,
+#     plot_density_comparison,
+# )
+
+
+# =========================================================
+# Pricing kernels
+# =========================================================
+# =========================================================
+# Pricing kernel
+# =========================================================
+
+from . import pricing_kernel
+
+from .pricing_kernel import (
+
+    # Registry
     get_transform,
     available_transforms,
     register_transform,
+
+    # Configs
     ThetaSpec,
-    ConditionalRiskSpec,
+    ExponentialSpec,
     BetaCalibrationSpec,
     NonparametricCalibrationSpec,
     BootstrapSpec,
@@ -93,6 +152,15 @@ from .pricing_kernels import (
     KeySpec,
     FitDiagnostics,
 
+
+    # Methods
+    ExponentialKernel,
+    ExponentialPolynomialKernel,
+    BetaCalibration,
+    NonparametricCalibration,
+    CRRAKernel,
+
+    # Plots
     plot_surface,
     plot_surface_panels,
     plot_pqk_multipanel,
@@ -105,4 +173,38 @@ from .pricing_kernels import (
     plot_pricing_kernel_panels,
     plot_rra_panels,
     plot_surface_3d_by_T,
+    plot_pit_calibration_panels,
 )
+# =========================================================
+# Dealer positioning
+# =========================================================
+
+from .dealer_positioning import *
+
+# =========================================================
+# Post estimation
+# =========================================================
+
+from .post_estimation.multiplots_error_diagn import *
+from .post_estimation.quantilereg import *
+from .post_estimation.TVP_QSVAR import *
+from .post_estimation.wavelets import *
+from .post_estimation.tex import *
+from .post_estimation.utils import *
+from .post_estimation.generalizedquantilesreg import *
+
+# =========================================================
+# Useful
+# =========================================================
+from .Useful_functions.merging_helpers import *
+
+
+# =========================================================
+# Automatic export list
+# =========================================================
+
+__all__ = [
+    name
+    for name in globals()
+    if not name.startswith("_")
+]

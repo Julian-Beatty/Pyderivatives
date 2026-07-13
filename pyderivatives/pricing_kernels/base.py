@@ -3,7 +3,9 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Tuple
 import copy
-
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import gaussian_kde
 import numpy as np
 import pandas as pd
 
@@ -11,6 +13,7 @@ from .config import BootstrapSpec, CacheSpec, FitDiagnostics, KeySpec
 from .utils import (
     _as_1d,
     _cdf_from_density,
+    _trapz_normalize_density,
     _safe_interp,
     _find_spot,
     _find_sigma,
@@ -83,6 +86,15 @@ class MeasureTransform(ABC):
         verbose: bool = True,
         penalty_value: float = 1e100,
         cache_spec: CacheSpec = CacheSpec(),
+        behavioral: bool = False,
+        stock_df: Optional[pd.DataFrame] = None,
+        stock_date_col: str = "date",
+        volume_col: str = "volume",
+        k1: float = 1.0,
+        k2: float = 1.2,
+        k3: float = 1.0,
+        sentiment_alpha: float = 0.05,
+
     ):
         self.key_spec = key_spec
         self.fit_trim_alpha = _validate_fit_trim_alpha(fit_trim_alpha)
@@ -94,6 +106,17 @@ class MeasureTransform(ABC):
         self.penalty_value = float(penalty_value)
         self.cache_spec = cache_spec
 
+        # Optional Crisostomo-style behavioral overlay, applied after the chosen transform.
+        self.behavioral = bool(behavioral)
+        self.stock_df = None if stock_df is None else stock_df.copy()
+        self.stock_date_col = str(stock_date_col)
+        self.volume_col = str(volume_col)
+        self.k1 = float(k1)
+        self.k2 = float(k2)
+        self.k3 = float(k3)
+        self.sentiment_alpha = float(sentiment_alpha)
+        self.sentiment_by_date_: Dict[pd.Timestamp, dict] = {}
+
         self.models_by_T_: Dict[float, Any] = {}
         self.history_by_T_: Dict[float, pd.DataFrame] = {}
         self.fit_history_by_T_: Dict[float, pd.DataFrame] = {}
@@ -103,21 +126,82 @@ class MeasureTransform(ABC):
     # --------------------------
     # Public API
     # --------------------------
+    def _kde_cdf_value(self, x_now: float, history: np.ndarray) -> float:
+        """
+        Gaussian KDE estimate of F(x_now) from historical observations.
+        Used for Crisostomo IV and volume empirical quantiles.
+        """
+        from scipy.stats import gaussian_kde
+    
+        history = np.asarray(history, dtype=float)
+        history = history[np.isfinite(history)]
+    
+        if history.size < 5 or not np.isfinite(x_now):
+            return np.nan
+    
+        sd = float(np.std(history, ddof=1))
+        if not np.isfinite(sd) or sd <= 0:
+            return float(np.mean(history <= x_now))
+    
+        lo = min(float(np.min(history)), float(x_now)) - 4.0 * sd
+        hi = max(float(np.max(history)), float(x_now)) + 4.0 * sd
+    
+        grid = np.linspace(lo, hi, 2000)
+    
+        try:
+            kde = gaussian_kde(history)
+            pdf = kde(grid)
+        except Exception:
+            return float(np.mean(history <= x_now))
+    
+        pdf = np.where(np.isfinite(pdf) & (pdf >= 0), pdf, 0.0)
+    
+        cdf = np.empty_like(grid)
+        cdf[0] = 0.0
+        cdf[1:] = np.cumsum(
+            0.5 * (pdf[1:] + pdf[:-1]) * np.diff(grid)
+        )
+    
+        total = cdf[-1]
+        if not np.isfinite(total) or total <= self.eps:
+            return float(np.mean(history <= x_now))
+    
+        cdf = cdf / total
+    
+        return float(np.clip(np.interp(x_now, grid, cdf), 0.0, 1.0))
 
-    def fit(self, rnd_history_dict: Dict[Any, dict], logreturns: pd.DataFrame | pd.Series):
+    def fit(
+        self,
+        rnd_history_dict: Dict[Any, dict],
+        stock_df: Optional[pd.DataFrame] = None,
+        *,
+        price_col: Optional[str] = None,
+        adjusted_price_col: Optional[str] = None,
+        adjustment_factor_col: Optional[str] = None,
+        return_col: Optional[str] = None,
+    ):
         """
         Fit one transformation model per maturity slice.
 
-        Parameters
-        ----------
-        rnd_history_dict:
-            {date: info_dict}, where each info_dict contains RND/CDF surfaces.
-        logreturns:
-            Time series of adjusted log returns. Either:
-                - Series indexed by date
-                - DataFrame with DatetimeIndex and one return column
-                - DataFrame with columns ['date', return_col]
+        The stock dataframe is the single source for realized returns and,
+        if behavioral=True, trading volume. Realized log returns are built from
+        either a return column, an adjusted-price column, or price adjusted by
+        an adjustment/share factor.
         """
+        if stock_df is not None:
+            self.stock_df = stock_df.copy()
+
+        if self.stock_df is None:
+            raise ValueError("fit() requires stock_df, or stock_df must be supplied in the constructor.")
+
+        logreturns = self._return_series_from_stock_df(
+            self.stock_df,
+            price_col=price_col,
+            adjusted_price_col=adjusted_price_col,
+            adjustment_factor_col=adjustment_factor_col,
+            return_col=return_col,
+        )
+
         fit_cache_key = None
         if self.cache_spec.enabled and self.cache_spec.cache_fit:
             fit_cache_key = _cache_key({
@@ -132,6 +216,16 @@ class MeasureTransform(ABC):
                 "class": self.__class__.__name__,
                 "params": self._cache_params(),
                 "n_dates": len(rnd_history_dict),
+                "stock_n": 0 if self.stock_df is None else len(self.stock_df),
+                "price_col": price_col,
+                "adjusted_price_col": adjusted_price_col,
+                "adjustment_factor_col": adjustment_factor_col,
+                "return_col": return_col,
+                "behavioral": self.behavioral,
+                "k1": self.k1,
+                "k2": self.k2,
+                "k3": self.k3,
+                "sentiment_alpha": self.sentiment_alpha,
             })
             cached = _cache_load(self.cache_spec.folder, fit_cache_key)
             if cached is not None:
@@ -142,6 +236,10 @@ class MeasureTransform(ABC):
 
         history_by_T = self.build_history_by_maturity(rnd_history_dict, logreturns)
         self.history_by_T_ = history_by_T
+        if self.behavioral:
+            self.sentiment_by_date_ = self._build_behavioral_sentiment_by_date(rnd_history_dict)
+        else:
+            self.sentiment_by_date_ = {}
         self.fit_history_by_T_ = {}
         self.models_by_T_ = {}
         self.fit_diagnostics_ = {}
@@ -405,6 +503,69 @@ class MeasureTransform(ABC):
             return np.nan, None
         return float(window.sum()), pd.Timestamp(window.index[-1])
 
+    def _return_series_from_stock_df(
+        self,
+        stock_df: pd.DataFrame,
+        *,
+        price_col: Optional[str] = None,
+        adjusted_price_col: Optional[str] = None,
+        adjustment_factor_col: Optional[str] = None,
+        return_col: Optional[str] = None,
+    ) -> pd.Series:
+        """Build daily log returns from the stock dataframe."""
+        df = stock_df.copy()
+
+        if self.stock_date_col in df.columns:
+            idx = pd.to_datetime(df[self.stock_date_col]).dt.tz_localize(None)
+            df = df.set_index(idx)
+        else:
+            df.index = pd.to_datetime(df.index).tz_localize(None)
+
+        df = df.sort_index()
+
+        if return_col is not None and return_col in df.columns:
+            s = pd.to_numeric(df[return_col], errors="coerce")
+            s.index = pd.to_datetime(s.index).tz_localize(None)
+            return s.dropna().sort_index()
+
+        if adjusted_price_col is None:
+            for c in ("adj_price", "adjusted_price", "adj_close", "adjusted_close", "Adj Close", "adj_prc"):
+                if c in df.columns:
+                    adjusted_price_col = c
+                    break
+
+        if adjusted_price_col is not None and adjusted_price_col in df.columns:
+            price = pd.to_numeric(df[adjusted_price_col], errors="coerce")
+        else:
+            if price_col is None:
+                for c in ("price", "close", "Close", "prc", "PRC", "PX_LAST"):
+                    if c in df.columns:
+                        price_col = c
+                        break
+            if price_col is None or price_col not in df.columns:
+                raise ValueError(
+                    "Could not infer a price column. Supply price_col, adjusted_price_col, or return_col."
+                )
+
+            price = pd.to_numeric(df[price_col], errors="coerce").abs()
+
+            if adjustment_factor_col is None:
+                for c in ("ajexdi", "adj_factor", "adjustment_factor", "cfacpr", "split_factor"):
+                    if c in df.columns:
+                        adjustment_factor_col = c
+                        break
+
+            if adjustment_factor_col is not None and adjustment_factor_col in df.columns:
+                factor = pd.to_numeric(df[adjustment_factor_col], errors="coerce")
+                # Compustat-style ajexdi usually adjusts price by division.
+                price = price / factor.replace(0.0, np.nan)
+
+        price = price.replace([np.inf, -np.inf], np.nan).dropna()
+        price = price[price > 0].sort_index()
+        ret = np.log(price / price.shift(1)).replace([np.inf, -np.inf], np.nan).dropna()
+        ret.name = "log_return"
+        return ret
+
     # --------------------------
     # Transform helpers
     # --------------------------
@@ -416,6 +577,11 @@ class MeasureTransform(ABC):
     
         nT, nx = rnd_lr_surface.shape
     
+        base_physical_lr_surface = np.full((nT, nx), np.nan)
+        base_physical_cdf_lr_surface = np.full((nT, nx), np.nan)
+        base_pricing_kernel_surface = np.full((nT, nx), np.nan)
+        base_measure_weight_surface = np.full((nT, nx), np.nan)
+
         physical_lr_surface = np.full((nT, nx), np.nan)
         physical_cdf_lr_surface = np.full((nT, nx), np.nan)
         measure_weight_surface = np.full((nT, nx), np.nan)
@@ -441,14 +607,32 @@ class MeasureTransform(ABC):
                     info=info,
                 )
     
-                physical_lr_surface[j, :] = res["f_p"]
-                physical_cdf_lr_surface[j, :] = res["F_p"]
-                measure_weight_surface[j, :] = res["weight"]
-                pricing_kernel_surface[j, :] = res["pricing_kernel"]
+                f_base = _trapz_normalize_density(x_grid, res["f_p"], eps=self.eps)
+                F_base = _cdf_from_density(x_grid, f_base, eps=self.eps)
+                kernel_base = rnd_lr_surface[j, :] / np.maximum(f_base, self.eps)
+                weight_base = f_base / np.maximum(rnd_lr_surface[j, :], self.eps)
+
+                base_physical_lr_surface[j, :] = f_base
+                base_physical_cdf_lr_surface[j, :] = F_base
+                base_pricing_kernel_surface[j, :] = kernel_base
+                base_measure_weight_surface[j, :] = weight_base
+
+                f_p_final, F_p_final, kernel_final, weight_final, overlay_info = self._apply_behavioral_overlay_if_needed(
+                    x_grid=x_grid,
+                    f_q=rnd_lr_surface[j, :],
+                    f_p=f_base,
+                    info=info,
+                    T=T,
+                )
+
+                physical_lr_surface[j, :] = f_p_final
+                physical_cdf_lr_surface[j, :] = F_p_final
+                measure_weight_surface[j, :] = weight_final
+                pricing_kernel_surface[j, :] = kernel_final
     
                 rra_surface[j, :] = self.compute_relative_risk_aversion(
                     x_grid,
-                    res["pricing_kernel"],
+                    kernel_final,
                 )
     
                 matched_T_grid[j] = T_fit
@@ -458,6 +642,7 @@ class MeasureTransform(ABC):
                         "T": T,
                         "matched_T": T_fit,
                         "status": "success",
+                        "behavioral_overlay": overlay_info,
                     }
                 )
     
@@ -490,17 +675,22 @@ class MeasureTransform(ABC):
         # Gross return R = exp(lr)
         # f_R(R) = f_lr(lr) * |d lr / dR| = f_lr(lr) / R
         rnd_r_surface = rnd_lr_surface / np.maximum(grid_r[None, :], 1e-300)
+        base_physical_r_surface = base_physical_lr_surface / np.maximum(grid_r[None, :], 1e-300)
         physical_r_surface = physical_lr_surface / np.maximum(grid_r[None, :], 1e-300)
     
         # Terminal price / strike K = S0 * R
         # f_K(K) = f_lr(lr) * |d lr / dK| = f_lr(lr) / K
         rnd_k_surface = rnd_lr_surface / np.maximum(grid_k[None, :], 1e-300)
+        base_physical_k_surface = base_physical_lr_surface / np.maximum(grid_k[None, :], 1e-300)
         physical_k_surface = physical_lr_surface / np.maximum(grid_k[None, :], 1e-300)
     
         # CDF values are invariant under monotone transformations.
         cdf_r_surface = cdf_lr_surface
         cdf_k_surface = cdf_lr_surface
     
+        base_physical_cdf_r_surface = base_physical_cdf_lr_surface
+        base_physical_cdf_k_surface = base_physical_cdf_lr_surface
+
         physical_cdf_r_surface = physical_cdf_lr_surface
         physical_cdf_k_surface = physical_cdf_lr_surface
     
@@ -537,7 +727,15 @@ class MeasureTransform(ABC):
             "cdf_r_surface": cdf_r_surface,
             "cdf_k_surface": cdf_k_surface,
     
-            # physical density and CDF
+            # base physical density and CDF before behavioral adjustment
+            "base_physical_lr_surface": base_physical_lr_surface,
+            "base_physical_r_surface": base_physical_r_surface,
+            "base_physical_k_surface": base_physical_k_surface,
+            "base_physical_cdf_lr_surface": base_physical_cdf_lr_surface,
+            "base_physical_cdf_r_surface": base_physical_cdf_r_surface,
+            "base_physical_cdf_k_surface": base_physical_cdf_k_surface,
+
+            # final physical density and CDF
             "physical_lr_surface": physical_lr_surface,
             "physical_r_surface": physical_r_surface,
             "physical_k_surface": physical_k_surface,
@@ -550,6 +748,8 @@ class MeasureTransform(ABC):
             "pricing_kernel_surface": pricing_kernel_surface,
             "relative_risk_aversion_surface": rra_surface,
             "measure_weight_surface": measure_weight_surface,
+            "base_pricing_kernel_surface": base_pricing_kernel_surface,
+            "base_measure_weight_surface": base_measure_weight_surface,
     
             # diagnostics
             "fit_diagnostics": self.fit_diagnostics_,
@@ -570,6 +770,12 @@ class MeasureTransform(ABC):
                 T_grid=T_grid,
                 r_grid=grid_lr,
                 physical_lr_surface=rnd_lr_surface,
+            ),
+
+            "base_physical_moments": physical_moments_table(
+                T_grid=T_grid,
+                r_grid=grid_lr,
+                physical_lr_surface=base_physical_lr_surface,
             ),
         }
     
@@ -676,6 +882,404 @@ class MeasureTransform(ABC):
             return np.full_like(x_grid, np.nan, dtype=float)
         log_M = np.log(M)
         return -np.gradient(log_M, x_grid)
+
+
+    # --------------------------
+    # Optional behavioral overlay
+    # --------------------------
+
+    def _date_from_info(self, info: dict) -> pd.Timestamp | None:
+        for key in ("date", "day", "anchor_date", "valuation_date"):
+            if key in info and info[key] is not None:
+                try:
+                    return pd.Timestamp(info[key]).tz_localize(None)
+                except Exception:
+                    return None
+        meta = info.get("meta", {}) if isinstance(info.get("meta", {}), dict) else {}
+        for key in ("date", "day", "anchor_date", "valuation_date"):
+            if key in meta and meta[key] is not None:
+                try:
+                    return pd.Timestamp(meta[key]).tz_localize(None)
+                except Exception:
+                    return None
+        return None
+
+    def _extract_rn_skew(self, info: dict, T: float) -> float:
+        """Use already-computed RND moments. Does not recompute BKM."""
+        candidates = [
+            info.get("rnd_moments_table"),
+            info.get("risk_neutral_moments"),
+            info.get("moments"),
+        ]
+        for tbl in candidates:
+            if isinstance(tbl, pd.DataFrame):
+                tmp = tbl.copy()
+                skew_col = "skew" if "skew" in tmp.columns else ("skew_r" if "skew_r" in tmp.columns else None)
+                if skew_col is None:
+                    continue
+                if "T" in tmp.columns:
+                    idx = (tmp["T"].astype(float) - float(T)).abs().idxmin()
+                else:
+                    idx = tmp.index[0]
+                try:
+                    val = float(tmp.loc[idx, skew_col])
+                    if np.isfinite(val):
+                        return val
+                except Exception:
+                    pass
+        return np.nan
+
+    def _standardize_stock_df_for_sentiment(self) -> Optional[pd.DataFrame]:
+        if self.stock_df is None:
+            return None
+        df = self.stock_df.copy()
+        if self.stock_date_col in df.columns:
+            df["_date"] = pd.to_datetime(df[self.stock_date_col]).dt.tz_localize(None)
+            df = df.set_index("_date")
+        else:
+            df.index = pd.to_datetime(df.index).tz_localize(None)
+        df = df.sort_index()
+        return df
+    def _build_behavioral_sentiment_by_date(
+        self,
+        rnd_history_dict: Dict[Any, dict],
+    ) -> Dict[pd.Timestamp, dict]:
+        """
+        Build Crisostomo-style time-varying sentiment inputs by date.
+    
+        theta1:
+            Investor optimism / pessimism from empirical quantiles of IV changes.
+    
+            Low IV-change quantile  -> excessive optimism  -> theta1 < 0
+            High IV-change quantile -> excessive pessimism -> theta1 > 0
+    
+        theta2:
+            Investor confidence from empirical quantiles of volume ratio.
+    
+            Low volume quantile  -> underconfidence -> theta2 < 1
+            High volume quantile -> overconfidence  -> theta2 > 1
+    
+        theta3:
+            Maturity-specific tail sentiment computed later from RND skewness.
+        """
+        keys = sorted(rnd_history_dict.keys(), key=lambda x: pd.Timestamp(x))
+        stock = self._standardize_stock_df_for_sentiment()
+    
+        records = []
+    
+        for raw_date in keys:
+            date = pd.Timestamp(raw_date).tz_localize(None)
+            info = rnd_history_dict[raw_date]
+    
+            sigma = _find_sigma(info, self.key_spec.sigma_keys, default=np.nan)
+    
+            volume_ratio = np.nan
+            if stock is not None and self.volume_col in stock.columns:
+                v = pd.to_numeric(stock[self.volume_col], errors="coerce").sort_index()
+    
+                # Current one-month trading volume proxy: last 20 trading days up to date.
+                cur = v.loc[v.index <= date].tail(20).sum()
+    
+                # Prior three-month average monthly volume proxy:
+                # previous 60 trading days before the current 20-day block.
+                hist = v.loc[v.index < date].tail(80)
+                prev = hist.iloc[:-20] if len(hist) > 20 else pd.Series(dtype=float)
+    
+                prev_20d_equiv = prev.mean() * 20.0 if len(prev) > 0 else np.nan
+    
+                if (
+                    np.isfinite(cur)
+                    and np.isfinite(prev_20d_equiv)
+                    and prev_20d_equiv > 0
+                ):
+                    volume_ratio = float(cur / prev_20d_equiv)
+    
+            records.append(
+                {
+                    "date": date,
+                    "sigma": sigma,
+                    "volume_ratio": volume_ratio,
+                }
+            )
+    
+        df = pd.DataFrame(records).sort_values("date").reset_index(drop=True)
+    
+        if df.empty:
+            return {}
+    
+        # Crisostomo-style IV change:
+        # current IV minus average IV over previous three observations/months.
+        df["iv_lag_avg"] = df["sigma"].rolling(3, min_periods=1).mean().shift(1)
+        df["iv_change"] = df["sigma"] - df["iv_lag_avg"]
+    
+        out: Dict[pd.Timestamp, dict] = {}
+    
+        a = float(getattr(self, "sentiment_alpha", 0.05))
+    
+        for i, row in df.iterrows():
+            date = pd.Timestamp(row["date"])
+    
+            past_iv = df.loc[: i - 1, "iv_change"].dropna().to_numpy(dtype=float)
+            past_vol = df.loc[: i - 1, "volume_ratio"].dropna().to_numpy(dtype=float)
+    
+            iv_q = np.nan
+            vol_q = np.nan
+    
+            theta1 = 0.0
+            theta2 = 1.0
+    
+            # ------------------------------------------------------------
+            # theta1: optimism / pessimism from IV-change quantile
+            # ------------------------------------------------------------
+            iv_now = float(row["iv_change"]) if np.isfinite(row["iv_change"]) else np.nan
+    
+            if past_iv.size >= 20 and np.isfinite(iv_now):
+                iv_q = self._kde_cdf_value(iv_now, past_iv)   
+                
+                info_t = (
+                rnd_history_dict.get(date)
+                or rnd_history_dict.get(str(date.date()))
+                or rnd_history_dict.get(pd.Timestamp(date))
+                or {}
+            )
+                if info_t is None:
+                    info_t = rnd_history_dict.get(row["date"], {})
+    
+                try:
+                    rate = float(info_t.get("r", 0.0))
+                except Exception:
+                    rate = 0.0
+    
+                # Use a one-month risk-free return scale, as in the paper.
+                r_month = np.exp(rate / 12.0) - 1.0 if np.isfinite(rate) else 0.0
+    
+                if iv_q < a:
+                    # Low IV change = excessive optimism.
+                    # Correct by shifting density left.
+                    theta1 = -float(self.k1) * r_month * ((a - iv_q) / a)
+    
+                elif iv_q > 1.0 - a:
+                    # High IV change = excessive pessimism.
+                    # Correct by shifting density right.
+                    theta1 = float(self.k1) * r_month * ((iv_q - (1.0 - a)) / a)
+    
+            # ------------------------------------------------------------
+            # theta2: confidence / overconfidence from volume quantile
+            # ------------------------------------------------------------
+            vol_now = (
+                float(row["volume_ratio"])
+                if np.isfinite(row["volume_ratio"])
+                else np.nan
+            )
+    
+            if past_vol.size >= 20 and np.isfinite(vol_now):
+                vol_q = self._kde_cdf_value(vol_now, past_vol)
+                if vol_q < a:
+                    theta2 = float(
+                        self.k2 ** ((vol_q - a) / a)
+                    )
+                
+                elif vol_q > 1.0 - a:
+                    theta2 = float(
+                        self.k2 ** ((vol_q - (1.0 - a)) / a)
+                    )
+                
+                else:
+                    theta2 = 1.0
+    
+            out[date] = {
+                "iv_quantile": iv_q,
+                "volume_quantile": vol_q,
+                "theta1": theta1,
+                "theta2": theta2,
+                "iv_change": iv_now,
+                "volume_ratio": vol_now,
+            }
+    
+        return out
+
+    
+    def plot_empirical_vs_kde(
+        data,
+        *,
+        x_now=None,
+        title="Empirical distribution vs Gaussian KDE",
+        xlabel="Value",
+        bins=30,
+        grid_n=1000,
+    ):
+        data = np.asarray(data, dtype=float)
+        data = data[np.isfinite(data)]
+    
+        if data.size < 5:
+            raise ValueError("Need at least 5 finite observations.")
+    
+        sd = np.std(data, ddof=1)
+        if not np.isfinite(sd) or sd <= 0:
+            raise ValueError("Data has zero or invalid standard deviation.")
+    
+        lo = min(np.min(data), x_now) if x_now is not None and np.isfinite(x_now) else np.min(data)
+        hi = max(np.max(data), x_now) if x_now is not None and np.isfinite(x_now) else np.max(data)
+    
+        grid = np.linspace(lo - 3 * sd, hi + 3 * sd, grid_n)
+    
+        kde = gaussian_kde(data)
+        kde_pdf = kde(grid)
+    
+        plt.figure(figsize=(9, 4.5))
+    
+        plt.hist(
+            data,
+            bins=bins,
+            density=True,
+            alpha=0.35,
+            label="Empirical histogram",
+        )
+    
+        plt.plot(
+            grid,
+            kde_pdf,
+            linewidth=2.2,
+            label="Gaussian KDE",
+        )
+    
+        q05 = np.quantile(data, 0.05)
+        q95 = np.quantile(data, 0.95)
+    
+        plt.axvline(q05, linestyle="--", linewidth=1.4, label="Empirical 5% / 95%")
+        plt.axvline(q95, linestyle="--", linewidth=1.4)
+    
+        if x_now is not None and np.isfinite(x_now):
+            plt.axvline(x_now, linestyle="-", linewidth=2.0, label="Current value")
+    
+        plt.title(title)
+        plt.xlabel(xlabel)
+        plt.ylabel("Density")
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
+    def _tail_theta_from_skew(self, skew: float) -> float:
+        if not np.isfinite(skew):
+            return 0.0
+        if skew < -1.5:
+            return float(self.k3 * (-skew - 1.5))
+        if skew > 1.5:
+            return float(-self.k3 * (skew - 1.5))
+        return 0.0
+    def _apply_behavioral_overlay_if_needed(self, *, x_grid, f_q, f_p, info: dict, T: float):
+        x_grid = _as_1d(x_grid)
+        f_q = _trapz_normalize_density(x_grid, f_q, eps=self.eps)
+        f_p = _trapz_normalize_density(x_grid, f_p, eps=self.eps)
+    
+        if not self.behavioral:
+            F_p = _cdf_from_density(x_grid, f_p, eps=self.eps)
+            kernel = f_q / np.maximum(f_p, self.eps)
+            Em = float(np.trapezoid(kernel * f_p, x_grid))
+            if np.isfinite(Em) and Em > self.eps:
+                kernel = kernel / Em
+            weight = f_p / np.maximum(f_q, self.eps)
+            return f_p, F_p, kernel, weight, {"enabled": False}
+    
+        date = self._date_from_info(info)
+        s = self.sentiment_by_date_.get(date, {}) if date is not None else {}
+    
+        theta1 = float(s.get("theta1", 0.0))
+        theta2 = float(s.get("theta2", 1.0))
+    
+        if not np.isfinite(theta1):
+            theta1 = 0.0
+    
+        if not np.isfinite(theta2) or theta2 <= self.eps:
+            theta2 = 1.0
+    
+        skew = self._extract_rn_skew(info, T=float(T))
+        theta3 = self._tail_theta_from_skew(skew)
+    
+        # ------------------------------------------------------------
+        # Mean/variance correction, eq. (14)
+        # x_tilde = theta1 + theta2*x + (1-theta2)*mu
+        #
+        # If y = theta1 + theta2*x + (1-theta2)*mu,
+        # then x = (y - theta1 - (1-theta2)*mu) / theta2.
+        # This is equivalent to:
+        # x = (y - mu - theta1) / theta2 + mu.
+        # ------------------------------------------------------------
+        mu = float(np.trapezoid(x_grid * f_p, x_grid))
+    
+        x_preimage = (x_grid - mu - theta1) / theta2 + mu
+        f_mv = np.interp(
+            x_preimage,
+            x_grid,
+            f_p,
+            left=0.0,
+            right=0.0,
+        ) / theta2
+    
+        f_mv = _trapz_normalize_density(x_grid, f_mv, eps=self.eps)
+    
+        # ------------------------------------------------------------
+        # Tail sentiment SDF component, eq. (16)
+        # Positive theta3:
+        #   m_ts is larger in the left tail and smaller in the right tail.
+        #   Since density is divided by the SDF, probability moves from
+        #   left tail to right tail.
+        # ------------------------------------------------------------
+        F_mv = _cdf_from_density(x_grid, f_mv, eps=self.eps)
+    
+        a = float(getattr(self, "sentiment_alpha", 0.05))
+    
+        if np.all(np.isfinite(F_mv)):
+            q_left = float(np.interp(a, F_mv, x_grid))
+            q_right = float(np.interp(1.0 - a, F_mv, x_grid))
+        else:
+            q_left = np.nan
+            q_right = np.nan
+    
+        m_ts = np.ones_like(x_grid, dtype=float)
+    
+        if (
+            np.isfinite(theta3)
+            and abs(theta3) > 0
+            and np.isfinite(q_left)
+            and np.isfinite(q_right)
+        ):
+            left = x_grid < q_left
+            right = x_grid > q_right
+    
+            m_ts[left] = np.exp(
+                np.clip(theta3 * (q_left - x_grid[left]), -700, 700)
+            )
+    
+            m_ts[right] = np.exp(
+                np.clip(-theta3 * (x_grid[right] - q_right), -700, 700)
+            )
+    
+        # Eq. (19): density is divided by the SDF component and normalized.
+        f_final = f_mv / np.maximum(m_ts, self.eps)
+        f_final = _trapz_normalize_density(x_grid, f_final, eps=self.eps)
+        F_final = _cdf_from_density(x_grid, f_final, eps=self.eps)
+    
+        # Final pricing kernel is Q / final P.
+        kernel = f_q / np.maximum(f_final, self.eps)
+        Em = float(np.trapezoid(kernel * f_final, x_grid))
+        if np.isfinite(Em) and Em > self.eps:
+            kernel = kernel / Em
+    
+        weight = f_final / np.maximum(f_q, self.eps)
+    
+        return f_final, F_final, kernel, weight, {
+            "enabled": True,
+            "date": None if date is None else str(date.date()),
+            "theta1": theta1,
+            "theta2": theta2,
+            "theta3": theta3,
+            "rnd_skew_used": skew,
+            "iv_quantile": s.get("iv_quantile", np.nan),
+            "volume_quantile": s.get("volume_quantile", np.nan),
+            "q_left": q_left,
+            "q_right": q_right,
+        }
+    
 
     # --------------------------
     # Bootstrap

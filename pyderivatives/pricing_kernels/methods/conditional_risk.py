@@ -59,6 +59,15 @@ class ConditionalRiskKernel(MeasureTransform):
         verbose: bool = True,
         penalty_value: float = 1e100,
         cache_spec: CacheSpec = CacheSpec(),
+        
+        behavioral: bool = False,
+        stock_df: Optional[pd.DataFrame] = None,
+        stock_date_col: str = "date",
+        volume_col: str = "volume",
+        k1: float = 1.0,
+        k2: float = 1.2,
+        k3: float = 1.0,
+        sentiment_alpha: float = 0.05,
     ):
         super().__init__(
             key_spec=key_spec,
@@ -70,6 +79,14 @@ class ConditionalRiskKernel(MeasureTransform):
             verbose=verbose,
             penalty_value=penalty_value,
             cache_spec=cache_spec,
+            behavioral=behavioral,
+            stock_df=stock_df,
+            stock_date_col=stock_date_col,
+            volume_col=volume_col,
+            k1=k1,
+            k2=k2,
+            k3=k3,
+            sentiment_alpha=sentiment_alpha,
         )
         self.spec = spec
         self.maxiter = int(maxiter)

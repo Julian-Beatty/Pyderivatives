@@ -24,6 +24,7 @@ from .postprocess.iv import (
     iv_surface_from_calls,
     atm_summary_from_iv_surface,
     iv_surface_to_delta_surfaces,
+    bs_gamma_surface_from_iv,
 )
 
 from .postprocess.cdf import (
@@ -75,12 +76,28 @@ class GlobalSurfacePricer:
         return {str(k): float(v) for k, v in d.items()}
 
     @staticmethod
-    def _build_T_grid(day: CallSurfaceDay, T_grid: Optional[np.ndarray]) -> np.ndarray:
+    def _build_T_grid(
+        day: CallSurfaceDay,
+        T_grid: Optional[np.ndarray],
+        zero_dte: float = 0.3 / 365.0,
+    ) -> np.ndarray:
         if T_grid is None:
             T_grid = np.unique(day.T_obs)
+    
         T_grid = np.asarray(T_grid, float).ravel()
-        T_grid = T_grid[np.isfinite(T_grid) & (T_grid > 0)]
+    
+        valid = np.isfinite(T_grid) & (T_grid >= 0)
+        T_grid = T_grid[valid]
+    
+        zero_mask = np.isclose(T_grid, 0.0)
+    
+        if np.any(zero_mask):
+            T_grid = T_grid.copy()
+            T_grid[zero_mask] = float(zero_dte)
+    
+        T_grid = np.unique(T_grid)
         T_grid.sort()
+    
         return T_grid
 
     @staticmethod
@@ -166,20 +183,17 @@ class GlobalSurfacePricer:
         self.day_meta_ = {"S0": float(day.S0), "r": float(day.r), "q": float(q_use)}
         self.bounds=bounds
         return state
-
     def price(
         self,
         day: CallSurfaceDay,
         *,
-        # grid controls
         K_grid: Optional[np.ndarray] = None,
         T_grid: Optional[np.ndarray] = None,
         K_grid_n: int = 200,
-        grid_mode: str = "strike",      # "strike" | "moneyness"
+        grid_mode: str = "strike",
         m_grid: Optional[np.ndarray] = None,
         m_bounds: tuple[float, float] = (0.5, 1.5),
         m_grid_n: int = 200,
-        # outputs
         compute_rnd: bool = False,
         safety_clip: Optional[SafetyClipConfig] = None,
         compute_iv: bool = False,
@@ -190,17 +204,21 @@ class GlobalSurfacePricer:
         compute_delta: bool = False,
         iv_cfg: Optional[IVConfig] = None,
         cdf_cfg: Optional[CDFConfig] = None,
-        # overrides
         params_override: Optional[Dict[str, float]] = None,
+        compute_gamma: bool = False,
     ) -> Dict[str, Any]:
-        """
-        Price on a rectangular (K_grid x T_grid) using stored fitted params by default.
-        """
+    
         if self.model_ is None or self.state_ is None:
             raise RuntimeError("Call fit(...) before price(...).")
-
-        # grids
+    
         T_grid = self._build_T_grid(day, T_grid)
+        T_grid = np.asarray(T_grid, float)
+    
+        zero_mask = np.isclose(T_grid, 0.0)
+        if np.any(zero_mask):
+            T_grid = T_grid.copy()
+            T_grid[zero_mask] = 3.0 / 365.0
+    
         K_grid = self._build_K_grid(
             day,
             K_grid=K_grid,
@@ -210,35 +228,44 @@ class GlobalSurfacePricer:
             m_bounds=m_bounds,
             m_grid_n=m_grid_n,
         )
-
-        # parameters
-        params = self.state_.params if params_override is None else {str(k): float(v) for k, v in params_override.items()}
-
-        # compute fitted call surface
+    
+        params = (
+            self.state_.params
+            if params_override is None
+            else {str(k): float(v) for k, v in params_override.items()}
+        )
+    
         C_fit = self.model_.price_surface(K_grid, T_grid, params)
-
-        # assemble output (mirrors your old dict)
+    
         q_use = float(self.day_meta_["q"]) if self.day_meta_ else float(day.q)
-
+        date_use = getattr(day, "date", None)
+    
         out: Dict[str, Any] = {
             "model": self.model_name,
+            "date": date_use,
             "success": bool(self.state_.success),
             "params": dict(params),
             "S0": float(day.S0),
             "r": float(day.r),
             "q": float(q_use),
-        
-            "ticker": getattr(day, "ticker", "Unknown"),   # <-- ADD THIS LINE
-        
+            "ticker": getattr(day, "ticker", "Unknown"),
             "grid_k": K_grid,
             "T_grid": T_grid,
             "C_fit": np.asarray(C_fit, float),
             "meta": dict(self.state_.fit_meta),
-            "day": day,
+            "day": {
+                "date": date_use,
+                "S0": float(day.S0),
+                "r": float(day.r),
+                "q": float(day.q),
+                "ticker": str(getattr(day, "ticker", "Unknown")),
+                "K_obs": np.asarray(day.K_obs, float),
+                "T_obs": np.asarray(day.T_obs, float),
+                "C_obs": np.asarray(day.C_obs, float),
+            },
             "bounds_spec": self.bounds,
         }
-
-        # ========= RND via BL (+ safety clip) =========
+    
         if compute_rnd:
             rnd_raw = breeden_litzenberger_pdf(
                 out["C_fit"],
@@ -247,24 +274,24 @@ class GlobalSurfacePricer:
                 r=float(day.r),
                 floor=1e-12,
             )
-        
+    
             cfg = safety_clip if safety_clip is not None else SafetyClipConfig(enabled=False)
-        
+    
             rnd_clip, clip_info = apply_safety_clip_surface(
                 rnd_raw,
                 K_grid=out["grid_k"],
                 S0=float(day.S0),
                 cfg=cfg,
             )
-        
+    
             out["rnd_k_surface"] = np.asarray(rnd_clip, float)
-        
+    
             out["safety_clip"] = {
                 "enabled": bool(cfg.enabled),
                 "any_used": bool(any(d.get("used", False) for d in clip_info)),
                 "per_row": clip_info,
             }
-        
+    
             out["grid_lr"], out["rnd_lr_surface"] = strike_rnd_to_return_density(
                 out["rnd_k_surface"],
                 K_grid=out["grid_k"],
@@ -272,7 +299,7 @@ class GlobalSurfacePricer:
                 return_type="log",
                 normalize=True,
             )
-        
+    
             out["grid_r"], out["rnd_r_surface"] = strike_rnd_to_return_density(
                 out["rnd_k_surface"],
                 K_grid=out["grid_k"],
@@ -280,18 +307,18 @@ class GlobalSurfacePricer:
                 return_type="gross",
                 normalize=True,
             )
-        
+    
             out["grid_lr"] = np.asarray(out["grid_lr"], float)
             out["rnd_lr_surface"] = np.asarray(out["rnd_lr_surface"], float)
             out["grid_r"] = np.asarray(out["grid_r"], float)
             out["rnd_r_surface"] = np.asarray(out["rnd_r_surface"], float)
-        
+    
             if compute_moments:
                 cfg_m = moments_cfg if moments_cfg is not None else MomentsConfig(
                     renormalize=True,
                     clip_negative=True,
                 )
-        
+    
                 out["rnd_moments_table"] = logreturn_moments_table(
                     out["rnd_k_surface"],
                     K_grid=out["grid_k"],
@@ -300,51 +327,78 @@ class GlobalSurfacePricer:
                     cfg=cfg_m,
                 )
     
-            # ========= IV surface =========
-            if compute_iv:
-                cfg_iv = iv_cfg if iv_cfg is not None else IVConfig()
-                iv_surf = iv_surface_from_calls(
-                    out["C_fit"],
+        if compute_iv:
+            cfg_iv = iv_cfg if iv_cfg is not None else IVConfig()
+    
+            iv_surf = iv_surface_from_calls(
+                out["C_fit"],
+                K_grid=K_grid,
+                T_grid=T_grid,
+                S0=float(day.S0),
+                r=float(day.r),
+                q=float(q_use),
+                cfg=cfg_iv,
+            )
+    
+            out["iv_surface"] = np.asarray(iv_surf, float)
+            if compute_gamma:
+                out["gamma_surface"] = bs_gamma_surface_from_iv(
+                    iv_surf,
                     K_grid=K_grid,
                     T_grid=T_grid,
                     S0=float(day.S0),
                     r=float(day.r),
                     q=float(q_use),
-                    cfg=cfg_iv,
                 )
-                out["iv_surface"] = np.asarray(iv_surf, float)
-                out.update(atm_summary_from_iv_surface(iv_surf, K_grid=K_grid, T_grid=T_grid, S0=float(day.S0)))
+            out.update(
+                atm_summary_from_iv_surface(
+                    iv_surf,
+                    K_grid=K_grid,
+                    T_grid=T_grid,
+                    S0=float(day.S0),
+                )
+            )
     
-                if compute_delta:
-                    out["delta_dict"] = iv_surface_to_delta_surfaces(
-                        iv_surface=iv_surf,
-                        K_grid=K_grid,
-                        T_grid=T_grid,
-                        S0=float(day.S0),
-                        r=float(day.r),
-                    )
-
-        # ========= CDF surface (use CLIPPED RND) =========
+            if compute_delta:
+                out["delta_dict"] = iv_surface_to_delta_surfaces(
+                    iv_surface=iv_surf,
+                    K_grid=K_grid,
+                    T_grid=T_grid,
+                    S0=float(day.S0),
+                    r=float(day.r),
+                )
+    
         if compute_cdf:
             if "rnd_k_surface" not in out:
                 raise ValueError("compute_cdf=True requires compute_rnd=True.")
-        
+    
             cfg_cdf = cdf_cfg if cdf_cfg is not None else CDFConfig()
-        
+    
             out["rnd_cdf_surface"] = cdf_from_pdf_surface(
                 out["rnd_k_surface"],
                 K_grid=out["grid_k"],
                 cfg=cfg_cdf,
             )
-
-        # ========= repricing diagnostics on observed points =========
+    
         if compute_obs_reprice:
-            C_hat_obs = reprice_observed_points(self.model_, day.K_obs, day.T_obs, params)
+            C_hat_obs = reprice_observed_points(
+                self.model_,
+                day.K_obs,
+                day.T_obs,
+                params,
+            )
+    
             out["C_hat_obs"] = np.asarray(C_hat_obs, float)
             out["errors"] = error_summary(day.C_obs, C_hat_obs)
-            out["errors_by_T"] = error_by_maturity(day.K_obs, day.T_obs, day.C_obs, C_hat_obs)
-
+            out["errors_by_T"] = error_by_maturity(
+                day.K_obs,
+                day.T_obs,
+                day.C_obs,
+                C_hat_obs,
+            )
+    
         return out
+    
 
     def fit_and_price(self, day: CallSurfaceDay, **kwargs) -> Dict[str, Any]:
         """

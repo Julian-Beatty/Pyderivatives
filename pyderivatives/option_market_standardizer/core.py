@@ -674,3 +674,89 @@ def collapse_duplicate_strikes(
         collapsed = collapsed.sort_values(keys).reset_index(drop=True)
 
     return collapsed
+import copy
+import pandas as pd
+
+def merge_option_markets(
+    *markets,
+    collapse_duplicates: bool = True,
+    prefer_stock: str = "longest",
+):
+    """
+    Merge/appends multiple OptionMarketStandardizer-like objects.
+
+    - Appends cleaned option dataframes: .opt_std
+    - Uses the longest .stock_raw by default
+    - Appends .options_raw if present
+    - Returns a copied market object using the first market as template
+    """
+
+    if len(markets) < 2:
+        raise ValueError("Pass at least two option market objects.")
+
+    out = copy.copy(markets[0])
+
+    # -------------------------
+    # Merge cleaned option data
+    # -------------------------
+    opt_dfs = []
+    for m in markets:
+        if not hasattr(m, "opt_std") or m.opt_std is None:
+            raise ValueError("Each market must have a non-empty .opt_std dataframe.")
+        opt_dfs.append(m.opt_std.copy())
+
+    opt_std = pd.concat(opt_dfs, ignore_index=True, sort=False)
+
+    for c in ["date", "exdate"]:
+        if c in opt_std.columns:
+            opt_std[c] = pd.to_datetime(opt_std[c], errors="coerce").dt.normalize()
+
+    if "option_right" in opt_std.columns:
+        opt_std["option_right"] = (
+            opt_std["option_right"].astype(str).str.strip().str.lower().str[0]
+        )
+
+    if collapse_duplicates:
+        opt_std = collapse_duplicate_strikes(opt_std)
+
+    sort_cols = [
+        c for c in ["date", "rounded_maturity", "option_right", "strike"]
+        if c in opt_std.columns
+    ]
+    if sort_cols:
+        opt_std = opt_std.sort_values(sort_cols).reset_index(drop=True)
+
+    out.opt_std = opt_std
+
+    # -------------------------
+    # Pick stock_raw
+    # -------------------------
+    stock_dfs = [
+        m.stock_raw.copy()
+        for m in markets
+        if hasattr(m, "stock_raw") and m.stock_raw is not None
+    ]
+
+    if stock_dfs:
+        if prefer_stock == "longest":
+            out.stock_raw = max(stock_dfs, key=len).reset_index(drop=True)
+        elif prefer_stock == "first":
+            out.stock_raw = stock_dfs[0].reset_index(drop=True)
+        elif prefer_stock == "last":
+            out.stock_raw = stock_dfs[-1].reset_index(drop=True)
+        else:
+            raise ValueError("prefer_stock must be 'longest', 'first', or 'last'.")
+
+    # -------------------------
+    # Optional: append raw options too
+    # -------------------------
+    raw_dfs = [
+        m.options_raw.copy()
+        for m in markets
+        if hasattr(m, "options_raw") and m.options_raw is not None
+    ]
+
+    if raw_dfs:
+        out.options_raw = pd.concat(raw_dfs, ignore_index=True, sort=False)
+
+    return out

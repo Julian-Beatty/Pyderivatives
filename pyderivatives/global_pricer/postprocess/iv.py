@@ -564,4 +564,51 @@ def iv_surface_to_delta_surfaces(
         "atm_delta_put_abs": atm_delta_put_abs,
         "delta_skew_surface": delta_skew_surface,
     }
+def bs_gamma_surface_from_iv(
+    iv_surface: np.ndarray,
+    *,
+    K_grid: np.ndarray,
+    T_grid: np.ndarray,
+    S0: float,
+    r: float,
+    q: float = 0.0,
+) -> np.ndarray:
+    """
+    Black-Scholes gamma using the fitted IV surface.
 
+    Gamma = exp(-qT) * phi(d1) / (S0 * sigma * sqrt(T))
+    """
+
+    iv = np.asarray(iv_surface, float)
+    K = np.asarray(K_grid, float).ravel()
+    T = np.asarray(T_grid, float).ravel()
+
+    if iv.shape != (T.size, K.size):
+        raise ValueError("iv_surface must have shape (len(T_grid), len(K_grid)).")
+
+    out = np.full_like(iv, np.nan, dtype=float)
+
+    for i, Ti in enumerate(T):
+        if Ti <= 0 or not np.isfinite(Ti):
+            continue
+
+        sig = iv[i, :]
+        valid = np.isfinite(sig) & (sig > 0) & np.isfinite(K) & (K > 0)
+
+        if not np.any(valid):
+            continue
+
+        vol_sqrtT = sig[valid] * np.sqrt(Ti)
+
+        d1 = (
+            np.log(S0 / K[valid])
+            + (r - q + 0.5 * sig[valid] ** 2) * Ti
+        ) / vol_sqrtT
+
+        out[i, valid] = (
+            np.exp(-q * Ti)
+            * norm.pdf(d1)
+            / (S0 * vol_sqrtT)
+        )
+
+    return out
