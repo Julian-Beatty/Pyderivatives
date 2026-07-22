@@ -105,6 +105,7 @@ def run_backtest(
     config: EvaluationConfig,
     start_i: Optional[int] = None,
     end_i: Optional[int] = None,
+    evaluation_plan=None,
     model_names: Optional[Sequence[str]] = None,
     progress_every: int = 25,
     verbose: bool = True,
@@ -209,17 +210,39 @@ def run_backtest(
         e = len(indexed_dates) if end_i is None else int(end_i)
 
         date_items = indexed_dates[s:e]
+
+        plan_by_date = None
+        if evaluation_plan is not None:
+            plan_by_date = {
+                _clean_date(getattr(x, "date", x["date"] if isinstance(x, dict) else None)): x
+                for x in evaluation_plan
+            }
+            date_items = [
+                (i, d) for i, d in indexed_dates
+                if _clean_date(d) in plan_by_date
+            ]
+
         date_items = date_items[:: int(config.eval_step)]
 
         if verbose:
+            calibration = getattr(model, "calibration", None)
+            if calibration is None or not getattr(model, "requires_fit", False):
+                window_label = config.window_type
+                reserve_label = config.reserve_obs
+                min_fit_label = config.min_fit_obs
+            else:
+                window_label = calibration.mode
+                reserve_label = calibration.reserve_obs
+                min_fit_label = calibration.min_fit_dates
+
             print(
                 f"[{model.name}] starting "
                 f"| dates={len(date_items)} "
                 f"| horizons={horizons} "
                 f"| start_i={s} | end_i={e} "
-                f"| window={config.window_type} "
-                f"| reserve_obs={config.reserve_obs} "
-                f"| min_fit_obs={config.min_fit_obs} "
+                f"| window={window_label} "
+                f"| reserve_obs={reserve_label} "
+                f"| min_fit_obs={min_fit_label} "
                 f"| evaluation_strategy={config.evaluation_strategy} "
                 f"| date_alignment={config.date_alignment}",
                 flush=True,
@@ -251,6 +274,9 @@ def run_backtest(
                 # For shared_path, non-reference models only forecast on
                 # reference-model selected dates.
                 override_info = None
+                planned_info = None
+                if plan_by_date is not None:
+                    planned_info = plan_by_date.get(clean_date)
                 if (
                     config.evaluation_strategy == "shared_path"
                     and model.name != config.path_reference_model
@@ -268,6 +294,17 @@ def run_backtest(
 
                 try:
                     call_config = config
+
+                    if planned_info is not None:
+                        call_config = copy.copy(config)
+                        getter = (
+                            (lambda k, default=None: planned_info.get(k, default))
+                            if isinstance(planned_info, dict)
+                            else (lambda k, default=None: getattr(planned_info, k, default))
+                        )
+                        object.__setattr__(call_config, "_override_target_maturity", float(getter("T_actual")))
+                        object.__setattr__(call_config, "_override_realized_horizon_days", int(getter("realized_horizon_days")))
+                        object.__setattr__(call_config, "_override_end_date", getter("end_date"))
 
                     # For GARCH/KDE/etc., force realized horizon to match
                     # reference RND actual observed maturity.

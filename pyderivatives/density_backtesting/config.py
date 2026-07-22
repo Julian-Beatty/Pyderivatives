@@ -1,9 +1,74 @@
 # config.py
 
 from dataclasses import dataclass, field
-from typing import Any, Optional, Sequence
+from typing import Any, Dict, Optional, Sequence
 
 from .preprocessing import ReturnConfig
+
+
+@dataclass(frozen=True)
+class TransformCalibrationSpec:
+    """Per-model calibration settings for Q-to-P density transforms.
+
+    The window is expressed in calendar time so it matches
+    ``pricing_kernel.transform_one_date`` exactly.  Each TransformRNDModel
+    may therefore use a different calibration protocol inside one backtest.
+    """
+
+    mode: str = "expanding"
+    lookback_days: Optional[int] = None
+    lookahead_days: int = 0
+    fixed_end_date: Optional[Any] = None
+
+    reserve_obs: int = 252
+    min_fit_dates: int = 30
+    fit_kwargs: Dict[str, Any] = field(default_factory=dict)
+
+    def validate(self):
+        if self.mode not in {"fixed", "expanding", "rolling", "centered"}:
+            raise ValueError(
+                "mode must be 'fixed', 'expanding', 'rolling', or 'centered'."
+            )
+
+        if self.mode == "fixed" and self.fixed_end_date is None:
+            raise ValueError("fixed_end_date is required when mode='fixed'.")
+
+        if self.mode == "rolling":
+            if self.lookback_days is None or int(self.lookback_days) <= 0:
+                raise ValueError(
+                    "lookback_days must be positive when mode='rolling'."
+                )
+
+        if self.mode == "centered":
+            if self.lookback_days is None or int(self.lookback_days) < 0:
+                raise ValueError(
+                    "lookback_days must be nonnegative when mode='centered'."
+                )
+            if int(self.lookahead_days) < 0:
+                raise ValueError(
+                    "lookahead_days must be nonnegative when mode='centered'."
+                )
+
+        if int(self.reserve_obs) < 0:
+            raise ValueError("reserve_obs cannot be negative.")
+
+        if int(self.min_fit_dates) < 1:
+            raise ValueError("min_fit_dates must be at least 1.")
+
+        return self
+
+    def transform_kwargs(self) -> Dict[str, Any]:
+        """Keyword arguments forwarded to transform_one_date()."""
+        self.validate()
+        return {
+            "mode": self.mode,
+            "lookback_days": self.lookback_days,
+            "lookahead_days": int(self.lookahead_days),
+            "fixed_end_date": self.fixed_end_date,
+            "reserve_obs": int(self.reserve_obs),
+            "min_fit_dates": int(self.min_fit_dates),
+            "fit_kwargs": dict(self.fit_kwargs),
+        }
 
 
 @dataclass(frozen=True)

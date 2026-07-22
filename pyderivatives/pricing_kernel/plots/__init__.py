@@ -18,6 +18,7 @@ from .panels import (
 
 from .multipanel import (
     plot_pqk_multipanel,
+    plot_pqk_time_panels,
     M_Q_K_multipanel_multi,
 )
 
@@ -39,6 +40,7 @@ __all__ = [
     "plot_pricing_kernel_panels",
     "plot_rra_panels",
     "plot_pqk_multipanel",
+    "plot_pqk_time_panels",
     "M_Q_K_multipanel_multi",
     "plot_pit_calibration_panels",
 ]

@@ -465,45 +465,92 @@ def get_data(
         print("\nNo usable options data compiled across the target window.")
         return pd.DataFrame()
 
-def quick_option_market(vendor_name, stock_filename, option_filename,maturity_filter, pickle_path=None):
+from pathlib import Path
+import pickle
+import pandas as pd
+
+
+def quick_option_market(
+    vendor_name,
+    stock_filename,
+    option_filename,
+    maturity_filter,
+    yield_curve_files,
+    *,
+    data_directory_path=None,
+    ticker="USO",
+    pickle_path=None,
+):
     """
-    Builds the yield curve, standardizes option market data, filters OTM calls and puts,
-    applies put-call parity to puts, and returns a combined, sorted DataFrame.
-    Optionally saves the option_market_class object as a pickle file.
-    
-    Parameters:
-    -----------
+    Build and standardize an option market, retain selected OTM options,
+    convert puts to call-equivalent prices using put-call parity, and return
+    the combined option DataFrame and OptionMarketStandardizer object.
+
+    Parameters
+    ----------
     vendor_name : str
-        Name of the vendor (e.g., "massively").
-    stock_filename : str
-        Filename of the stock data CSV.
-    option_filename : str
-        Prefix/filename of the option data.
+        Name of the option-data vendor.
+
+    stock_filename : str or Path
+        Stock-data filename.
+
+    option_filename : str or Path
+        Option-data filename or filename prefix.
+
+    maturity_filter : sequence
+        Maturity filter passed to ``OptionMarketStandardizer.keep_options``.
+
+    yield_curve_files : str, Path, or sequence of str or Path
+        Treasury yield-curve file or files used to construct the interest-rate
+        surface.
+
+    data_directory_path : str or Path, optional
+        Directory containing the stock, option, and related input files.
+        Defaults to the original Optiondata directory.
+
+    ticker : str, default "USO"
+        Underlying ticker.
+
     pickle_path : str or Path, optional
-        Full path destination to save the option_market_class object. 
-        If None, the object will not be saved to disk. Default is None.
+        Destination for saving the ``OptionMarketStandardizer`` object.
+        No pickle is created when this is None.
+
+    Returns
+    -------
+    otm_options_only_df : pandas.DataFrame
+        Combined OTM call and put-call-parity-adjusted put observations.
+
+    option_market_class : OptionMarketStandardizer
+        Initialized option-market standardizer.
     """
-    # 1. Hardcoded Treasury files
-    yield_curve_files = [
-        r"C:\Users\beatt\Spyder directory\State Price Density\Optiondata\daily-treasury-rates (1).csv",
-        r"C:\Users\beatt\Spyder directory\State Price Density\Optiondata\par-yield-curve-rates-1990-2022.csv",
-        r"C:\Users\beatt\Spyder directory\State Price Density\Optiondata\daily-treasury-rates (2).csv",
-        r"C:\Users\beatt\Spyder directory\State Price Density\Optiondata\daily-treasury-rates_late.csv",
-    ]
-    
-    # 2. Build yield curve and fit Svensson surface
+    # Permit either one Treasury file or multiple Treasury files.
+    if isinstance(yield_curve_files, (str, Path)):
+        yield_curve_files = [yield_curve_files]
+
+    yield_curve_files = [Path(file) for file in yield_curve_files]
+
+    missing_files = [file for file in yield_curve_files if not file.exists()]
+    if missing_files:
+        missing_text = "\n".join(str(file) for file in missing_files)
+        raise FileNotFoundError(
+            f"The following yield-curve files were not found:\n{missing_text}"
+        )
+
+
+    data_directory_path = Path(data_directory_path)
+
+    # 1. Build the yield curve and fit the Svensson surface.
     df_yield = build_yield_dataframe(yield_curve_files)
+
     rc_object = create_yield_curve(df_yield)
+
     sve_nsurface = rc_object.fit(
         "svensson",
         grid_days=[1, 365 * 3],
-        fit_days_window=[1, 365 * 5]
+        fit_days_window=[1, 365 * 5],
     )
-    
-    # 3. Initialize Option Market Standardizer
-    data_dir = Path(
-        "C:/Users/beatt/Spyder directory/State Price Density/Optiondata"
-    )
+
+    # 2. Initialize the option-market standardizer.
     option_market_class = OptionMarketStandardizer(
         option_data_filename_prefix=option_filename,
         stock_data_filename=stock_filename,
@@ -511,47 +558,62 @@ def quick_option_market(vendor_name, stock_filename, option_filename,maturity_fi
         vendor_name=vendor_name,
         stock_date_col="date",
         stock_price_col="price",
-        data_directory_path=data_dir,
+        data_directory_path=data_directory_path,
         rate_date_col="Date",
-        ticker="USO",
+        ticker=ticker,
     )
-    # --- New Pickling Logic ---
+
+    # 3. Optionally save the standardized option-market object.
     if pickle_path is not None:
         save_path = Path(pickle_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+
         print(f"Pickling option_market_class to: {save_path}")
-        with save_path.open("wb") as fh:
-            pickle.dump({"option_market":option_market_class}, fh)
-    
-    # 4. Data Preprocessing: Filter OTM Calls
+
+        with save_path.open("wb") as file:
+            pickle.dump(
+                {"option_market": option_market_class},
+                file,
+                protocol=pickle.HIGHEST_PROTOCOL,
+            )
+
+    # 4. Retain OTM calls.
     otm_calls = option_market_class.keep_options(
         maturity_filter=maturity_filter,
-        moneyness_filter=[0.7, 1.3],
+        moneyness_filter=[1.0, 1.3],
         min_volume_filter=-1,
         min_price_filter=0.01,
         option_right_filter="C",
-        #date_filter=["2024-07-22", "2026-12-31"]
     )
-    
-    # 5. Data Preprocessing: Filter OTM Puts
+
+    # 5. Retain OTM puts.
     otm_puts = option_market_class.keep_options(
         maturity_filter=maturity_filter,
         moneyness_filter=[0.7, 0.99],
         min_volume_filter=-1,
         min_price_filter=0.01,
         option_right_filter="P",
-        #date_filter=["2024-07-22", "2026-12-31"]
     )
-    
-    # 6. Apply Put-Call Parity and combine
-    otm_puts_tocalls = put_call_parity(otm_puts)
-    
+
+    # 6. Convert puts to call-equivalent prices and combine.
+    otm_puts_to_calls = put_call_parity(otm_puts)
+
     otm_options_only_df = (
-        pd.concat([otm_calls, otm_puts_tocalls])
+        pd.concat(
+            [otm_calls, otm_puts_to_calls],
+            ignore_index=True,
+        )
         .sort_values(["date", "exdate", "strike"])
         .reset_index(drop=True)
     )
-    
+
     return otm_options_only_df, option_market_class
+
+
+from pathlib import Path
+from typing import Optional, Sequence, Union
+
+import pandas as pd
 
 
 def quick_calibrate(
@@ -560,11 +622,62 @@ def quick_calibrate(
     m_bounds=(0.02, 3.5),
     m_grid_n=300,
     plot=True,
+    plot_surfaces=True,
+    save_plots=False,
+    save_dir: Optional[Union[str, Path]] = None,
+    save_tag: Optional[str] = None,
     date_range=None,
     ticker=None,
+    interactive_surfaces=False,
+    show_plots=True,
+    surface_x_axis="lr",
+    surface_x_bounds=None,
 ):
     """
-    date_range options:
+    Calibrate the Heston-Kou model for each selected date and optionally
+    produce and save diagnostic plots.
+
+    Parameters
+    ----------
+    otm_options_df : pandas.DataFrame
+        Option-market DataFrame.
+
+    T_grid : array-like
+        Maturity grid used by the global surface pricer.
+
+    m_bounds : tuple, default (0.02, 3.5)
+        Moneyness bounds used when constructing the pricing grid.
+
+    m_grid_n : int, default 300
+        Number of moneyness-grid points.
+
+    plot : bool, default True
+        Whether to create call-curve and RND panel plots.
+
+    plot_surfaces : bool, default True
+        Whether to create IV and RND surface plots.
+
+    save_plots : bool, default False
+        Whether to save generated plots.
+
+    save_dir : str or Path, optional
+        Parent directory in which plot subfolders are created. When omitted,
+        defaults to:
+
+            results_tables_and_figures/quick_calibrate
+
+    save_tag : str, optional
+        Prefix used in saved filenames. If omitted, ticker is used. If ticker
+        is also omitted, "calibration" is used.
+
+        Example filenames:
+
+            USO_IVsurf_2025_01_03.png
+            USO_RNDsurf_2025_01_03.png
+
+    date_range : None, tuple, or list
+        Date-selection specification.
+
         None
             Use all dates.
 
@@ -572,31 +685,73 @@ def quick_calibrate(
             Use dates between start and end, inclusive.
 
         ["2025-01-03", "2025-01-10"]
-            Use only these specific dates.
+            Use only the listed dates.
+
+    ticker : str, optional
+        Ticker used in plot titles and default filenames.
+
+    interactive_surfaces : bool, default False
+        Whether IV and RND surfaces should use Plotly.
+
+        For reliable PNG saving, use False unless the required Plotly static
+        image dependencies are installed.
+
+    show_plots : bool, default True
+        Whether generated figures should be displayed.
+
+    surface_x_axis : {"k", "lr", "r"}, default "lr"
+        Horizontal axis for IV and RND surface plots.
+
+    surface_x_bounds : tuple, optional
+        Bounds applied to the selected surface x-axis. For example,
+        (-0.5, 0.5) for log returns.
+
+    Returns
+    -------
+    dict
+        Dictionary mapping each calibration date to its pricing results.
     """
-
     x0 = dict(
-        v0=0.04, theta=0.5, kappa=6.0, sigma_v=0.2, rho=-0.6,
-        lam=0.6, p_up=0.50, eta1=20.0, eta2=20.0
-    )
-
+                # fast variance factor (front-end skew / short maturities)
+                v0=0.1,    # initial variance v1(0)
+                theta=0.5,  # long-run mean of v1
+                kappa=6.0, # mean reversion speed of v1 (large => fast)
+                sigma_v=0.2,  # vol-of-vol of v1 (controls smile strength)
+                rho=-0.6,   # corr(return shock, v1 shock): negative => left skew
+            
+                # # slow variance factor (term structure / persistence)
+                # v02=0.06,    # initial variance v2(0)
+                # theta2=0.5,  # long-run mean of v2
+                # kappa2=15.5, # mean reversion speed of v2 (smaller => more persistent)
+                # sigma2=0.2,  # vol-of-vol of v2
+                # rho2=-0.20,  # corr(return shock, v2 shock)
+            
+                # Kou jumps (double exponential jump sizes)
+                lam=0.6,     # jump intensity: expected jumps per year
+                p_up=0.50,   # P(jump is upward)
+                eta1=15.0,   # upward jump rate: E[J | J>0] = 1/eta1
+                eta2=15.0,   # downward jump rate: E[-J | J<0] = 1/eta2
+            )
+        
+            ###Setting up boundaries
     lb = dict(
-        v0=0.005, theta=0.01, kappa=5, sigma_v=0.05, rho=-0.98,
-        lam=0.02, p_up=0.05, eta1=10.0, eta2=10.0
-    )
-
+            v0=0.005, theta=0.4, kappa=0.5,  sigma_v=0.1, rho=-0.85,
+            #v02=0.005, theta2=0.05, kappa2=15.5,  sigma2=0.1, rho2=-0.95,
+            lam=0.02, p_up=0.05, eta1=10.0, eta2=10.0,
+            )
+            
     ub = dict(
-        v0=18.0, theta=2.0, kappa=5000.0, sigma_v=45, rho=0.98,
-        lam=50, p_up=0.95, eta1=20, eta2=20
-    )
-
+            v0=5.0, theta=1.0, kappa=5000.0, sigma_v=5.0, rho=0.85,
+            #v02=10.9, theta2=1.0, kappa2=5000.0,  sigma2=15.9, rho2=0.95,  
+            lam=30.0, p_up=0.95, eta1=20.0, eta2=20.0,
+            )
     RND_today = {}
 
     safety_clip = SafetyClipConfig(
         enabled=True,
         clip_left=True,
         clip_right=True,
-        center="mode"
+        center="mode",
     )
 
     iv_cfg = IVConfig(
@@ -608,67 +763,149 @@ def quick_calibrate(
         vega_floor=1e-11,
         brent_maxiter=150,
         time_value_floor=1e-11,
-        reject_low_vega=1e-11
+        reject_low_vega=1e-11,
     )
 
-    # --------------------------------------------------
-    # Date selection
-    # --------------------------------------------------
-    df = otm_options_df.copy()
-    df["date"] = pd.to_datetime(df["date"])
+    # ==================================================
+    # Plot directory setup
+    # ==================================================
+    plot_paths = {}
 
-    all_dates = pd.DatetimeIndex(df["date"].dropna().unique()).sort_values()
+    if save_plots:
+        base_save_dir = (
+            Path(save_dir)
+            if save_dir is not None
+            else Path("results_tables_and_figures") / "quick_calibrate"
+        )
+
+        filename_tag = save_tag or ticker or "calibration"
+
+        plot_paths = {
+            "call_panels": base_save_dir / "call_panels",
+            "rnd_panels": base_save_dir / "rnd_panels",
+            "iv_surfaces": base_save_dir / "iv_surfaces",
+            "rnd_surfaces": base_save_dir / "rnd_surfaces",
+            "arbitrage_heatmaps": base_save_dir / "arbitrage_heatmaps",
+        }
+
+        for folder in plot_paths.values():
+            folder.mkdir(parents=True, exist_ok=True)
+
+    else:
+        filename_tag = save_tag or ticker or "calibration"
+
+    # ==================================================
+    # Date selection
+    # ==================================================
+    df = otm_options_df.copy()
+    df["date"] = pd.to_datetime(df["date"]).dt.normalize()
+
+    all_dates = pd.DatetimeIndex(
+        df["date"].dropna().unique()
+    ).sort_values()
 
     if date_range is None:
         date_list = all_dates
 
     elif isinstance(date_range, tuple) and len(date_range) == 2:
-        start_date = pd.to_datetime(date_range[0])
-        end_date = pd.to_datetime(date_range[1])
+        start_date = pd.to_datetime(date_range[0]).normalize()
+        end_date = pd.to_datetime(date_range[1]).normalize()
+
+        if start_date > end_date:
+            raise ValueError(
+                "The starting date cannot occur after the ending date."
+            )
 
         date_list = all_dates[
-            (all_dates >= start_date) & (all_dates <= end_date)
+            (all_dates >= start_date) &
+            (all_dates <= end_date)
         ]
 
     elif isinstance(date_range, list):
-        requested_dates = pd.to_datetime(date_range)
+        requested_dates = pd.DatetimeIndex(
+            pd.to_datetime(date_range)
+        ).normalize()
+
         date_list = all_dates[all_dates.isin(requested_dates)]
 
     else:
         raise ValueError(
-            "date_range must be None, a tuple like "
+            "date_range must be None, a tuple such as "
             "('2025-01-01', '2025-03-31'), or a list of dates."
         )
 
-    # --------------------------------------------------
+    if len(date_list) == 0:
+        raise ValueError(
+            "No option dates matched the requested date_range."
+        )
+
+    # ==================================================
     # Main calibration loop
-    # --------------------------------------------------
+    # ==================================================
     for date in date_list:
-        option_day_df = df[df["date"] == date]
+        option_day_df = df.loc[df["date"] == date].copy()
 
         readable_date = date.strftime("%Y_%m_%d")
         formatted_date = date.strftime("%Y-%m-%d")
 
-        out = CallSurfaceArbRepair(RepairConfig()).repair_one_date(option_day_df)
-        repaired_df = out["df_rep"]
-        pdict = out["plot_data"]
-        fg=plot_perturb(pdict,save=f"results_tables_and_figures/gallery/arbitrage_heatmaps/arbitrage_heatmap_{formatted_date}.png") ## Perbutation repair heatmap
+        print(f"Calibrating {formatted_date}...")
 
+        # ----------------------------------------------
+        # Arbitrage repair
+        # ----------------------------------------------
+        repair_output = CallSurfaceArbRepair(
+            RepairConfig()
+        ).repair_one_date(option_day_df)
 
-        day = make_day_from_df(repaired_df, price_col="C_rep")
-        day = CallSurfaceDay(
-                S0=day.S0,
-                r=day.r,
-                q=day.q,
-                K_obs=day.K_obs,
-                T_obs=day.T_obs,
-                C_obs=day.C_obs,
-                ticker=day.ticker,
-                date=date,
+        repaired_df = repair_output["df_rep"]
+        plot_data = repair_output["plot_data"]
+
+        heatmap_save_path = None
+        if save_plots:
+            heatmap_save_path = (
+                plot_paths["arbitrage_heatmaps"]
+                / f"{filename_tag}_arbitrage_heatmap_{readable_date}.png"
             )
 
-        pr = GlobalSurfacePricer("heston_kou", Umax=1500.0, n_quad=1500)
-        pr.fit(day, x0=x0, bounds=(lb, ub))
+        if plot or save_plots:
+            plot_perturb(
+                plot_data,
+                save=heatmap_save_path,
+            )
+
+        # ----------------------------------------------
+        # Construct daily surface data
+        # ----------------------------------------------
+        original_day = make_day_from_df(
+            repaired_df,
+            price_col="C_rep",
+        )
+
+        day = CallSurfaceDay(
+            S0=original_day.S0,
+            r=original_day.r,
+            q=original_day.q,
+            K_obs=original_day.K_obs,
+            T_obs=original_day.T_obs,
+            C_obs=original_day.C_obs,
+            ticker=original_day.ticker,
+            date=date,
+        )
+
+        # ----------------------------------------------
+        # Fit Heston-Kou surface
+        # ----------------------------------------------
+        pr = GlobalSurfacePricer(
+            "heston_kou",
+            Umax=1500.0,
+            n_quad=1500,
+        )
+
+        pr.fit(
+            day,
+            x0=x0,
+            bounds=(lb, ub),
+        )
 
         results = pr.price(
             day,
@@ -684,39 +921,105 @@ def quick_calibrate(
             compute_delta=True,
             compute_cdf=True,
             compute_gamma=True,
-
         )
 
-        print(f"Params for {formatted_date}: {results['params']}")
+        print(
+            f"Params for {formatted_date}: "
+            f"{results['params']}"
+        )
 
         RND_today[date] = results
 
-        if plot:
+        # ----------------------------------------------
+        # Output paths for this date
+        # ----------------------------------------------
+        if save_plots:
+            call_panel_path = (
+                plot_paths["call_panels"]
+                / f"{filename_tag}_call_panels_{readable_date}.png"
+            )
+
+            rnd_panel_path = (
+                plot_paths["rnd_panels"]
+                / f"{filename_tag}_RNDpanels_{readable_date}.png"
+            )
+
+            iv_surface_path = (
+                plot_paths["iv_surfaces"]
+                / f"{filename_tag}_IVsurf_{readable_date}.png"
+            )
+
+            rnd_surface_path = (
+                plot_paths["rnd_surfaces"]
+                / f"{filename_tag}_RNDsurf_{readable_date}.png"
+            )
+
+        else:
+            call_panel_path = None
+            rnd_panel_path = None
+            iv_surface_path = None
+            rnd_surface_path = None
+
+        # ----------------------------------------------
+        # Panel plots
+        # ----------------------------------------------
+        if plot or save_plots:
             panels.call_panels(
                 results,
                 day=day,
                 n_panels=6,
                 title=f"Call Curves on {formatted_date} for {ticker}",
                 T_cluster_tol=1 / 365,
-                x_axis="r", 
-                x_bounds=m_bounds
+                x_axis="r",
+                x_bounds=(0.5,1.5),
+                save=call_panel_path,
+                show=show_plots,
             )
 
             panels.rnd_panels(
                 results,
-                #n_panels=10,
-                #panel_shape=(5, 2),
-                title=f"RND on {readable_date} for {ticker}",
+                title=f"RND on {formatted_date} for {ticker}",
                 show_spot=True,
                 x_axis="lr",
-                pct_lower=0.05,
-                pct_upper=0.95,
+                pct_lower=None,
+                pct_upper=None,
                 snap_percentiles_to_traded_strikes=False,
                 only_plot_traded_maturities=False,
                 rnd_dict={"day": day},
-                x_bounds=(-0.5,1.5))
-                
+                x_bounds=(-0.85, 1.75),
+                save=rnd_panel_path,
+                show=show_plots,
+            )
 
+        # ----------------------------------------------
+        # IV and RND surface plots
+        # ----------------------------------------------
+        if plot_surfaces or save_plots:
+            surfaces.iv_surface_plot(
+                results,
+                title=(
+                    f"Implied Volatility Surface on "
+                    f"{formatted_date} for {ticker}"
+                ),
+                interactive=interactive_surfaces,
+                show=show_plots,
+                x_axis=surface_x_axis,
+                x_bounds=surface_x_bounds,
+                save=iv_surface_path,
+            )
+
+            surfaces.rnd_surface_plot(
+                results,
+                title=(
+                    f"Risk-Neutral Density Surface on "
+                    f"{formatted_date} for {ticker}"
+                ),
+                interactive=interactive_surfaces,
+                show=show_plots,
+                x_axis=surface_x_axis,
+                x_bounds=surface_x_bounds,
+                save=rnd_surface_path,
+            )
 
     return RND_today
 

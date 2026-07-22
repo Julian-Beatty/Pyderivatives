@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Optional, Sequence
 
 from .config import EvaluationConfig
@@ -12,14 +10,10 @@ from .forecast import ForecastDataset
 from .preprocessing import MarketData
 from .report import DensityEvaluationReport, evaluate_dataset
 from .runner import run_backtest
-
-
-@dataclass(frozen=True)
-class BacktestJob:
-    job_id: int
-    start_i: int
-    end_i: int
-    output_path: Optional[str] = None
+from .cluster import (
+    BacktestJob, ClusterBundle, build_cluster_plan,
+    merge_cluster_jobs, run_cluster_job,
+)
 
 
 @dataclass
@@ -33,6 +27,7 @@ class DensityBacktest:
         *,
         start_i: Optional[int] = None,
         end_i: Optional[int] = None,
+        evaluation_plan=None,
         model_names: Optional[Sequence[str]] = None,
         progress_every: int = 25,
         verbose: bool = True,
@@ -43,6 +38,7 @@ class DensityBacktest:
             config=self.config,
             start_i=start_i,
             end_i=end_i,
+            evaluation_plan=evaluation_plan,
             model_names=model_names,
             progress_every=progress_every,
             verbose=verbose,
@@ -63,53 +59,9 @@ class DensityBacktest:
 
         return evaluate_dataset(dataset, tests=tests)
 
-    def plan_jobs(
-        self,
-        *,
-        n_jobs: int,
-        output_dir: Optional[str] = None,
-        prefix: str = "density_backtest_part",
-    ) -> list[BacktestJob]:
-        if n_jobs < 1:
-            raise ValueError("n_jobs must be >= 1.")
-
-        max_dates = 0
-
-        for model in self.models:
-            n = len(model.evaluation_dates(self.market_data, self.config))
-            max_dates = max(max_dates, n)
-
-        if max_dates == 0:
-            return []
-
-        chunk = int(math.ceil(max_dates / n_jobs))
-        jobs = []
-
-        for j in range(n_jobs):
-            start = j * chunk
-            end = min((j + 1) * chunk, max_dates)
-
-            if start >= end:
-                continue
-
-            output_path = None
-
-            if output_dir is not None:
-                output_path = str(
-                    Path(output_dir)
-                    / f"{prefix}_{j:04d}_{start:06d}_{end:06d}.pkl"
-                )
-
-            jobs.append(
-                BacktestJob(
-                    job_id=j,
-                    start_i=start,
-                    end_i=end,
-                    output_path=output_path,
-                )
-            )
-
-        return jobs
+    def plan_jobs(self, **kwargs):
+        """Backward-compatible alias for :meth:`plan_cluster`."""
+        return self.plan_cluster(**kwargs)
 
     def run_job(
         self,
@@ -119,8 +71,7 @@ class DensityBacktest:
         **kwargs,
     ) -> ForecastDataset:
         dataset = self.run(
-            start_i=job.start_i,
-            end_i=job.end_i,
+            evaluation_plan=job.evaluations,
             **kwargs,
         )
 
@@ -128,6 +79,25 @@ class DensityBacktest:
             dataset.save(job.output_path)
 
         return dataset
+
+    def plan_cluster(self, **kwargs):
+        return build_cluster_plan(self, **kwargs)
+
+    def save_cluster_bundle(self, path, *, plan, metadata=None):
+        bundle = ClusterBundle(
+            backtest=self,
+            plan=plan,
+            metadata={} if metadata is None else dict(metadata),
+        )
+        return bundle.save(path)
+
+    @staticmethod
+    def run_cluster_job(bundle_path, job_id, **kwargs):
+        return run_cluster_job(bundle_path, job_id, **kwargs)
+
+    @staticmethod
+    def merge_cluster_jobs(bundle_path, paths_or_dir, **kwargs):
+        return merge_cluster_jobs(bundle_path, paths_or_dir, **kwargs)
 
     @staticmethod
     def merge_jobs(paths_or_datasets) -> ForecastDataset:

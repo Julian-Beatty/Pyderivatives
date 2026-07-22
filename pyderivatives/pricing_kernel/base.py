@@ -62,6 +62,7 @@ class MeasureTransform(HistoryMixin, BehavioralOverlayMixin, BootstrapMixin, ABC
         negative_skew_threshold: float = -1.5,
         theta_min: float = 0.25,
         theta_max: float = 4.0,
+
     ):
         self.key_spec = key_spec
         self.fit_trim_alpha = _validate_fit_trim_alpha(fit_trim_alpha)
@@ -129,7 +130,68 @@ class MeasureTransform(HistoryMixin, BehavioralOverlayMixin, BootstrapMixin, ABC
         self.fit_history_by_T_: Dict[float, pd.DataFrame] = {}
         self.fit_diagnostics_: Dict[float, FitDiagnostics] = {}
         self.is_fitted_: bool = False
-
+    @staticmethod
+    def _select_non_overlapping_history(
+        hist_T: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """
+        Greedily retain chronologically ordered forecast observations whose
+        realized-return windows do not overlap.
+    
+        Required columns
+        ----------------
+        date:
+            Forecast origin.
+    
+        end_date:
+            End date of the realized-return horizon.
+        """
+        if hist_T.empty:
+            return hist_T.copy()
+    
+        required = {"date", "end_date"}
+        missing = required.difference(hist_T.columns)
+    
+        if missing:
+            raise KeyError(
+                "Non-overlapping selection requires columns "
+                f"{sorted(required)}; missing {sorted(missing)}."
+            )
+    
+        hist = hist_T.copy()
+    
+        hist["date"] = pd.to_datetime(
+            hist["date"],
+            errors="coerce",
+        ).dt.tz_localize(None)
+    
+        hist["end_date"] = pd.to_datetime(
+            hist["end_date"],
+            errors="coerce",
+        ).dt.tz_localize(None)
+    
+        hist = (
+            hist.dropna(subset=["date", "end_date"])
+            .sort_values(["date", "end_date"])
+            .reset_index(drop=True)
+        )
+    
+        keep = []
+        previous_end = None
+    
+        for i, row in hist.iterrows():
+            start = row["date"]
+            end = row["end_date"]
+    
+            if end < start:
+                continue
+    
+            # Allow a new horizon to begin on the previous horizon's end date.
+            if previous_end is None or start >= previous_end:
+                keep.append(i)
+                previous_end = end
+    
+        return hist.iloc[keep].reset_index(drop=True)
     def fit(
         self,
         rnd_history_dict: Dict[Any, dict],
@@ -139,7 +201,11 @@ class MeasureTransform(HistoryMixin, BehavioralOverlayMixin, BootstrapMixin, ABC
         adjusted_price_col: Optional[str] = None,
         adjustment_factor_col: Optional[str] = None,
         return_col: Optional[str] = None,
+        non_overlapping: bool = False,
+
     ):
+        non_overlapping = bool(non_overlapping)
+
         if stock_df is not None:
             self.stock_df = stock_df.copy()
 
@@ -186,6 +252,7 @@ class MeasureTransform(HistoryMixin, BehavioralOverlayMixin, BootstrapMixin, ABC
                 "negative_skew_threshold": self.negative_skew_threshold,
                 "theta_min": self.theta_min,
                 "theta_max": self.theta_max,
+                "non_overlapping": non_overlapping,
             })
 
             cached = _cache_load(self.cache_spec.folder, fit_cache_key)
@@ -212,7 +279,16 @@ class MeasureTransform(HistoryMixin, BehavioralOverlayMixin, BootstrapMixin, ABC
         self.fit_diagnostics_ = {}
 
         for T in self._select_fit_maturities(history_by_T):
-            hist_T = self._apply_fit_trim(history_by_T[T].copy())
+            hist_T = history_by_T[T].copy()
+        
+            n_before_overlap_filter = int(len(hist_T))
+        
+            if non_overlapping:
+                hist_T = self._select_non_overlapping_history(hist_T)
+        
+            n_after_overlap_filter = int(len(hist_T))
+        
+            hist_T = self._apply_fit_trim(hist_T)
             fit_hist_T = hist_T.loc[hist_T["used_in_fit"]].copy()
 
             n_total = int(len(hist_T))

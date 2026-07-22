@@ -174,6 +174,7 @@ from .pricing_kernel import (
     plot_rra_panels,
     plot_surface_3d_by_T,
     plot_pit_calibration_panels,
+    plot_pqk_time_panels
 )
 # =========================================================
 # Dealer positioning

@@ -439,12 +439,12 @@ def rnd_panels(
 
     pct_lower: Optional[float] = None,
     pct_upper: Optional[float] = None,
-    mark_percentiles: bool = True,
+    mark_percentiles: bool = False,
     pct_line_style: str = ":",
     pct_line_width: float = 2.0,
 
-    show_mode: bool = True,
-    show_median: bool = True,
+    show_mode: bool = False,
+    show_median: bool = False,
     mode_line_style: str = "-.",
     median_line_style: str = "--",
     mode_line_width: float = 2.0,
@@ -461,7 +461,7 @@ def rnd_panels(
     traded_maturity_tol: float = 1.5 / 365.0,
 
     x_tick_nbins: int = 10,
-    show_mean: bool = True,
+    show_mean: bool = False,
     mean_line_style: str = "-",
     mean_line_width: float = 2.0,
     mean_color: str = "tab:brown",

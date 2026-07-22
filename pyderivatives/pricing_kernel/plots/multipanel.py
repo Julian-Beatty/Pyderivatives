@@ -667,3 +667,365 @@ def M_Q_K_multipanel_multi(*args, **kwargs):
     Backward-compatible alias for the older multipanel plotting name.
     """
     return plot_pqk_multipanel(*args, **kwargs)
+
+def plot_pqk_time_panels(
+    result_dict: Dict[object, dict],
+    T_target: float,
+    *,
+    maturity_units: Literal["years", "days"] = "years",
+    maturity_tol: Optional[float] = None,
+    n_panels: Optional[int] = None,
+    panel_shape: Tuple[int, int] = (2, 4),
+    target_dates: Optional[Tuple[object, ...]] = None,
+    date_bounds: Optional[Tuple[object, object]] = None,
+    x_axis: str = "R",
+    x_bounds: Optional[Tuple[float, float]] = None,
+    truncate_kernel: bool = True,
+    ptail_alpha: Tuple[float, float] = (0.10, 0.00),
+    truncation_measure: str = "physical",
+    kernel_yscale: Literal["linear", "log"] = "linear",
+    kernel_log_eps: float = 1e-300,
+    kernel_linestyle: str = "--",
+    lw_density: float = 1.8,
+    lw_kernel: float = 1.5,
+    alpha_density: float = 0.95,
+    alpha_kernel: float = 0.90,
+    color: Optional[str] = None,
+    title: Optional[str] = None,
+    legend_loc: str = "upper right",
+    save: Optional[Union[str, Path]] = None,
+    dpi: int = 200,
+    show: bool = True,
+):
+    """
+    Plot risk-neutral density, physical density, and pricing kernel in a
+    multi-panel figure across calendar dates at one fixed maturity.
+
+    Each panel corresponds to one date in ``result_dict``.  Within a panel,
+    the risk-neutral density and physical density are plotted on the left
+    axis and the pricing kernel is plotted on the right axis.
+
+    Parameters
+    ----------
+    result_dict:
+        Dictionary keyed by valuation date.  Each value must be one
+        transformed result dictionary containing ``T_grid`` and the density
+        and pricing-kernel surfaces.
+
+    T_target:
+        Requested maturity.  Interpreted in years unless
+        ``maturity_units='days'``.
+
+    maturity_tol:
+        Optional maximum distance from ``T_target``.  It is interpreted in
+        the same units as ``T_target``.  Dates whose nearest maturity is
+        farther away are skipped.
+
+    target_dates:
+        Optional dates to plot.  For each requested date, the nearest
+        available date in ``result_dict`` is selected.  When omitted, dates
+        are selected approximately evenly through the available time series.
+
+    date_bounds:
+        Optional inclusive calendar-date bounds used before panel selection.
+
+    x_axis:
+        One of ``{'r', 'R', 'return', 'K'}``.
+
+    truncate_kernel:
+        If True, plot the pricing kernel only over the inner probability
+        region defined by ``ptail_alpha`` and ``truncation_measure``.
+
+    color:
+        Optional Matplotlib color used consistently for Q, P, and M in every
+        panel. When omitted, Matplotlib selects the color automatically.
+
+    title:
+        Optional figure-level title.
+
+    save:
+        Optional output path. Parent directories are created automatically.
+    """
+    import matplotlib.pyplot as plt
+    import pandas as pd
+
+    if not isinstance(result_dict, dict) or len(result_dict) == 0:
+        raise ValueError("result_dict must be a non-empty dictionary keyed by date.")
+
+    x_axis = _standardize_x_axis(x_axis)
+    kernel_yscale = str(kernel_yscale).lower().strip()
+
+    if kernel_yscale not in {"linear", "log"}:
+        raise ValueError("kernel_yscale must be 'linear' or 'log'.")
+
+    nrows, ncols = map(int, panel_shape)
+    if nrows <= 0 or ncols <= 0:
+        raise ValueError("panel_shape must contain positive integers.")
+
+    max_panels = nrows * ncols
+
+    if maturity_units == "days":
+        T_target_years = float(T_target) / 365.0
+        tol_years = None if maturity_tol is None else float(maturity_tol) / 365.0
+    elif maturity_units == "years":
+        T_target_years = float(T_target)
+        tol_years = None if maturity_tol is None else float(maturity_tol)
+    else:
+        raise ValueError("maturity_units must be either 'years' or 'days'.")
+
+    q_key, q_label, _ = _surface_key("rnd", x_axis)
+    p_key, p_label, _ = _surface_key("physical", x_axis)
+    M_key = "pricing_kernel_surface"
+    cdf_q_key = _cdf_key("rnd", x_axis)
+    cdf_p_key = _cdf_key("physical", x_axis)
+
+    # Parse and retain only usable date entries.
+    parsed_items = []
+    for raw_date, result in result_dict.items():
+        try:
+            date = pd.Timestamp(raw_date).normalize()
+        except Exception:
+            continue
+
+        if not isinstance(result, dict):
+            continue
+
+        required = {"T_grid", q_key, p_key, M_key}
+        if not required.issubset(result):
+            continue
+
+        parsed_items.append((date, raw_date, result))
+
+    if not parsed_items:
+        raise ValueError("No valid dated transformed results were found.")
+
+    parsed_items.sort(key=lambda x: x[0])
+
+    if date_bounds is not None:
+        d0 = pd.Timestamp(date_bounds[0]).normalize()
+        d1 = pd.Timestamp(date_bounds[1]).normalize()
+        if d1 < d0:
+            d0, d1 = d1, d0
+        parsed_items = [item for item in parsed_items if d0 <= item[0] <= d1]
+
+    if not parsed_items:
+        raise ValueError("date_bounds removed all available dates.")
+
+    # Select dates either by nearest requested dates or evenly over time.
+    if target_dates is not None:
+        available_dates = np.array([item[0].value for item in parsed_items], dtype=np.int64)
+        selected_positions = []
+
+        for target in target_dates:
+            target_value = pd.Timestamp(target).normalize().value
+            pos = int(np.argmin(np.abs(available_dates - target_value)))
+            if pos not in selected_positions:
+                selected_positions.append(pos)
+
+        selected_positions = selected_positions[:max_panels]
+    else:
+        if n_panels is None:
+            n_panels = max_panels
+        n_panels = min(max(1, int(n_panels)), max_panels, len(parsed_items))
+        selected_positions = (
+            np.linspace(0, len(parsed_items) - 1, n_panels)
+            .round()
+            .astype(int)
+            .tolist()
+        )
+        selected_positions = list(dict.fromkeys(selected_positions))
+
+    selected = [parsed_items[i] for i in selected_positions]
+
+    if truncate_kernel:
+        a_left, a_right = map(float, ptail_alpha)
+        if not (
+            0.0 <= a_left < 1.0
+            and 0.0 <= a_right < 1.0
+            and a_left + a_right < 1.0
+        ):
+            raise ValueError(
+                "ptail_alpha must satisfy 0 <= left,right < 1 and left+right < 1."
+            )
+
+        truncation_measure = str(truncation_measure).lower().strip()
+        if truncation_measure in {"physical", "p"}:
+            trunc_kind = "physical"
+        elif truncation_measure in {"risk_neutral", "risk-neutral", "rnd", "q"}:
+            trunc_kind = "rnd"
+        else:
+            raise ValueError(
+                "truncation_measure must be 'physical' or 'risk_neutral'."
+            )
+    else:
+        a_left = a_right = None
+        trunc_kind = None
+
+    fig, axes = plt.subplots(
+        nrows=nrows,
+        ncols=ncols,
+        figsize=(5.8 * ncols, 4.1 * nrows),
+        sharex=False,
+    )
+    axes = np.asarray(axes, dtype=object).ravel()
+
+    plotted = 0
+
+    for date, _, result in selected:
+        T_grid = _as_1d(result["T_grid"])
+        if T_grid.size == 0:
+            continue
+
+        j = int(np.argmin(np.abs(T_grid - T_target_years)))
+        maturity_error = abs(float(T_grid[j]) - T_target_years)
+
+        if tol_years is not None and maturity_error > tol_years:
+            continue
+
+        X, xlabel = _get_plot_x_grid(result, x_axis=x_axis)
+        q_surface = np.asarray(result[q_key], dtype=float)
+        p_surface = np.asarray(result[p_key], dtype=float)
+        M_surface = np.asarray(result[M_key], dtype=float)
+
+        expected_shape = (T_grid.size, X.size)
+        if (
+            q_surface.shape != expected_shape
+            or p_surface.shape != expected_shape
+            or M_surface.shape != expected_shape
+        ):
+            continue
+
+        if x_bounds is None:
+            xmask = np.isfinite(X)
+        else:
+            lo, hi = sorted(map(float, x_bounds))
+            xmask = np.isfinite(X) & (X >= lo) & (X <= hi)
+
+        if xmask.sum() < 2:
+            continue
+
+        X_plot = X[xmask]
+        q_plot = q_surface[j, xmask]
+        p_plot = p_surface[j, xmask]
+        M_plot = M_surface[j, xmask]
+
+        ax = axes[plotted]
+        ax2 = ax.twinx()
+
+        # --------------------------------------------------
+        # Publication-quality styling
+        # --------------------------------------------------
+        
+        rnd_color = color if color is not None else "royalblue"
+        physical_color = "firebrick"
+        kernel_color = "black"
+        
+        ax.plot(
+            X_plot,
+            q_plot,
+            color=rnd_color,
+            linewidth=2.4,
+            linestyle="-",
+            label="Risk-neutral density",
+        )
+        
+        ax.plot(
+            X_plot,
+            p_plot,
+            color=physical_color,
+            linewidth=2.4,
+            linestyle="-",
+            label="Physical density",
+        )
+
+        if truncate_kernel:
+            if trunc_kind == "physical":
+                F_surface = (
+                    np.asarray(result[cdf_p_key], dtype=float)
+                    if cdf_p_key in result
+                    else _get_cdf_surface(result, kind="physical", x_axis=x_axis)
+                )
+            else:
+                F_surface = (
+                    np.asarray(result[cdf_q_key], dtype=float)
+                    if cdf_q_key in result
+                    else _get_cdf_surface(result, kind="rnd", x_axis=x_axis)
+                )
+
+            if F_surface.shape == expected_shape:
+                F_plot = F_surface[j, xmask]
+                kmask = (
+                    np.isfinite(M_plot)
+                    & np.isfinite(F_plot)
+                    & (F_plot >= a_left)
+                    & (F_plot <= 1.0 - a_right)
+                )
+            else:
+                kmask = np.isfinite(M_plot)
+        else:
+            kmask = np.isfinite(M_plot)
+
+        X_kernel = X_plot[kmask]
+        M_kernel = M_plot[kmask]
+
+        if kernel_yscale == "log":
+            valid_kernel = np.isfinite(M_kernel) & (M_kernel > 0)
+            X_kernel = X_kernel[valid_kernel]
+            M_kernel = np.maximum(M_kernel[valid_kernel], kernel_log_eps)
+
+        if X_kernel.size > 1:
+            ax2.plot(
+                X_kernel,
+                M_kernel,
+                color=kernel_color,
+                linestyle="--",
+                linewidth=2.0,
+                label="Pricing kernel",
+            )
+        actual_days = 365.0 * float(T_grid[j])
+        ax.set_title(f"{date:%Y-%m-%d} | T≈{actual_days:.1f}d")
+        ax.grid(True, alpha=0.25)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel("Density")
+        ax2.set_ylabel("Pricing kernel")
+        ax2.set_yscale(kernel_yscale)
+
+        if x_bounds is not None:
+            ax.set_xlim(float(X_plot[0]), float(X_plot[-1]))
+
+        h1, l1 = ax.get_legend_handles_labels()
+        h2, l2 = ax2.get_legend_handles_labels()
+        ax.legend(h1 + h2, l1 + l2, loc=legend_loc, fontsize=8, frameon=True)
+
+        plotted += 1
+        if plotted >= max_panels:
+            break
+
+    if plotted == 0:
+        plt.close(fig)
+        raise ValueError(
+            "No panels could be plotted. Check T_target, maturity_tol, date_bounds, "
+            "and the surface keys in result_dict."
+        )
+
+    for ax in axes[plotted:]:
+        ax.axis("off")
+
+    if title is None:
+        target_days = 365.0 * T_target_years
+        title = (
+            "Risk-Neutral Density, Physical Density, and Pricing Kernel "
+            f"Through Time — T≈{target_days:.0f}d"
+        )
+
+    fig.suptitle(title, y=0.995, fontsize=14)
+    fig.subplots_adjust(top=0.90, wspace=0.30, hspace=0.38)
+
+    _maybe_save(fig, save, dpi=dpi)
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return fig

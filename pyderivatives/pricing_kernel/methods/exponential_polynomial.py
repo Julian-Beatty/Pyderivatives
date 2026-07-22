@@ -17,6 +17,8 @@ from ..utils import (
     _safe_interp,
     _trapz_normalize_density,
 )
+
+
 @dataclass
 class ExponentialPolynomialFitted:
     theta_hat: np.ndarray
@@ -27,17 +29,213 @@ class ExponentialPolynomialFitted:
     message: str
 
 
+def _physical_density_from_g(
+    x_grid: np.ndarray,
+    f_q: np.ndarray,
+    g: np.ndarray,
+    *,
+    eps: float,
+) -> np.ndarray:
+    """Compute f_P proportional to f_Q * exp(-g) in stable log space."""
+    x_grid = _as_1d(x_grid)
+    f_q = _as_1d(f_q)
+    g = _as_1d(g)
+
+    if not (x_grid.size == f_q.size == g.size):
+        raise ValueError("x_grid, f_q, and g must have the same length.")
+    if x_grid.size < 2:
+        raise ValueError("At least two grid points are required.")
+    if np.any(~np.isfinite(x_grid)) or np.any(np.diff(x_grid) <= 0):
+        raise ValueError("x_grid must be finite and strictly increasing.")
+    if np.any(~np.isfinite(f_q)) or np.any(f_q < 0):
+        raise ValueError("f_q must be finite and nonnegative.")
+    if np.any(~np.isfinite(g)):
+        raise ValueError("g must be finite.")
+
+    tiny = np.finfo(float).tiny
+    log_raw = np.log(np.maximum(f_q, tiny)) - g
+    log_raw -= float(np.max(log_raw))
+    raw_f_p = np.exp(log_raw)
+
+    f_p = _trapz_normalize_density(x_grid, raw_f_p, eps=eps)
+    if (
+        f_p.size != x_grid.size
+        or np.any(~np.isfinite(f_p))
+        or np.any(f_p < 0)
+    ):
+        raise ValueError("Could not construct a finite physical density.")
+    return f_p
+
+
+
+def _log_trapezoid_positive(
+    x_grid: np.ndarray,
+    log_values: np.ndarray,
+) -> float:
+    """Compute log(integral exp(log_values) dx) stably."""
+    x = _as_1d(x_grid)
+    log_y = _as_1d(log_values)
+
+    if x.size != log_y.size:
+        raise ValueError(
+            "x_grid and log_values must have the same length."
+        )
+
+    if (
+        x.size < 2
+        or np.any(~np.isfinite(x))
+        or np.any(np.diff(x) <= 0)
+    ):
+        raise ValueError(
+            "x_grid must contain finite, strictly increasing values."
+        )
+
+    log_terms = (
+        np.log(0.5 * np.diff(x))
+        + np.logaddexp(
+            log_y[:-1],
+            log_y[1:],
+        )
+    )
+
+    finite = np.isfinite(log_terms)
+
+    if not np.any(finite):
+        raise ValueError(
+            "The log-space integral contains no positive mass."
+        )
+
+    maximum = float(np.max(log_terms[finite]))
+
+    result = (
+        maximum
+        + np.log(
+            np.sum(
+                np.exp(
+                    log_terms[finite] - maximum
+                )
+            )
+        )
+    )
+
+    if not np.isfinite(result):
+        raise ValueError(
+            "The log-space integral is not finite."
+        )
+
+    return float(result)
+
+def _transform_diagnostics(
+    *,
+    x_grid: np.ndarray,
+    f_q: np.ndarray,
+    f_p: np.ndarray,
+    g: np.ndarray,
+    theta: np.ndarray,
+    effective_coefficients: np.ndarray,
+) -> dict:
+    """Diagnostics for concentrated or unstable transformed densities."""
+    x_grid = _as_1d(x_grid)
+    f_q = _as_1d(f_q)
+    f_p = _as_1d(f_p)
+    g = _as_1d(g)
+    theta = _as_1d(theta)
+    effective_coefficients = _as_1d(effective_coefficients)
+
+    tiny = np.finfo(float).tiny
+    peak = float(np.max(f_p))
+    threshold = 1e-8 * peak if peak > 0 else np.inf
+    support_fraction = float(np.mean(f_p > threshold))
+
+    physical_mean = float(np.trapezoid(x_grid * f_p, x_grid))
+    physical_variance = float(
+        np.trapezoid((x_grid - physical_mean) ** 2 * f_p, x_grid)
+    )
+    physical_entropy = float(
+        -np.trapezoid(f_p * np.log(np.maximum(f_p, tiny)), x_grid)
+    )
+
+    rnd_mean = float(np.trapezoid(x_grid * f_q, x_grid))
+    rnd_variance = float(
+        np.trapezoid((x_grid - rnd_mean) ** 2 * f_q, x_grid)
+    )
+
+    kl_pq = float(
+        np.trapezoid(
+            np.where(
+                (f_p > tiny) & (f_q > tiny),
+                f_p
+                * (
+                    np.log(np.maximum(f_p, tiny))
+                    - np.log(np.maximum(f_q, tiny))
+                ),
+                0.0,
+            ),
+            x_grid,
+        )
+    )
+
+    g_min = float(np.min(g))
+    g_max = float(np.max(g))
+    g_range = float(g_max - g_min)
+    jump_ratio = (
+        float(np.max(np.abs(np.diff(f_p))) / peak)
+        if len(f_p) > 1 and peak > 0
+        else np.nan
+    )
+
+    variance_ratio = (
+        float(physical_variance / rnd_variance)
+        if np.isfinite(rnd_variance) and rnd_variance > 0
+        else np.nan
+    )
+
+    warnings = []
+    if support_fraction < 0.10:
+        warnings.append("physical_density_effective_support_extremely_narrow")
+    elif support_fraction < 0.20:
+        warnings.append("physical_density_effective_support_narrow")
+
+    if g_range > 100:
+        warnings.append("exponential_tilt_extremely_large_g_range")
+    elif g_range > 50:
+        warnings.append("exponential_tilt_large_g_range")
+
+    if peak > 10:
+        warnings.append("physical_density_high_peak")
+    if np.isfinite(jump_ratio) and jump_ratio > 0.50:
+        warnings.append("physical_density_large_internal_jump")
+    if np.isfinite(variance_ratio) and variance_ratio < 0.05:
+        warnings.append("physical_density_variance_collapsed_relative_to_rnd")
+
+    return {
+        "effective_support_fraction_1e-8": support_fraction,
+        "physical_peak": peak,
+        "physical_mean": physical_mean,
+        "physical_variance": physical_variance,
+        "physical_entropy": physical_entropy,
+        "rnd_mean": rnd_mean,
+        "rnd_variance": rnd_variance,
+        "physical_to_rnd_variance_ratio": variance_ratio,
+        "kl_p_to_q": kl_pq,
+        "theta_l2_norm": float(np.linalg.norm(theta)),
+        "effective_return_coefficients": effective_coefficients.tolist(),
+        "g_min": g_min,
+        "g_max": g_max,
+        "g_range": g_range,
+        "max_adjacent_jump_ratio": jump_ratio,
+        "warnings": warnings,
+        "anomaly": bool(warnings),
+    }
+
+
 @register_transform("exponential_polynomial")
 class ExponentialPolynomialKernel(MeasureTransform):
     """
     Exponential-polynomial pricing-kernel transformation.
 
-    Parameterization:
-        M(r, sigma; theta) = exp(g(r, sigma; theta))
-
-    Physical density:
-        f_P(r) ∝ f_Q(r) / M(r, sigma; theta)
-               = f_Q(r) exp(-g(r, sigma; theta))
+    M(r, sigma; theta) = exp(g(r, sigma; theta))
+    f_P(r) proportional to f_Q(r) exp(-g(r, sigma; theta))
     """
 
     def __init__(
@@ -46,6 +244,7 @@ class ExponentialPolynomialKernel(MeasureTransform):
         theta_spec: ThetaSpec = ThetaSpec(),
         maxiter: int = 400,
         x0: Optional[np.ndarray] = None,
+        ridge_penalty: float = 0.0,
         key_spec: KeySpec = KeySpec(),
         fit_trim_alpha: Optional[Tuple[float, float]] = None,
         min_obs: int = 30,
@@ -55,7 +254,6 @@ class ExponentialPolynomialKernel(MeasureTransform):
         verbose: bool = True,
         penalty_value: float = 1e100,
         cache_spec: CacheSpec = CacheSpec(),
-    
         behavioral: bool = False,
         stock_df: Optional[pd.DataFrame] = None,
         stock_date_col: str = "date",
@@ -75,7 +273,6 @@ class ExponentialPolynomialKernel(MeasureTransform):
             verbose=verbose,
             penalty_value=penalty_value,
             cache_spec=cache_spec,
-        
             behavioral=behavioral,
             stock_df=stock_df,
             stock_date_col=stock_date_col,
@@ -85,12 +282,21 @@ class ExponentialPolynomialKernel(MeasureTransform):
             k3=k3,
             sentiment_alpha=sentiment_alpha,
         )
+        if float(ridge_penalty) < 0:
+            raise ValueError("ridge_penalty must be nonnegative.")
+
         self.theta_spec = theta_spec
         self.maxiter = int(maxiter)
         self.x0 = None if x0 is None else _as_1d(x0)
+        self.ridge_penalty = float(ridge_penalty)
 
     def _cache_params(self) -> dict:
-        return {"theta_spec": self.theta_spec, "maxiter": self.maxiter, "x0": self.x0}
+        return {
+            "theta_spec": self.theta_spec,
+            "maxiter": self.maxiter,
+            "x0": self.x0,
+            "ridge_penalty": self.ridge_penalty,
+        }
 
     def _theta_dim(self) -> int:
         return int(self.theta_spec.N) * (int(self.theta_spec.Ksig) + 1)
@@ -103,10 +309,18 @@ class ExponentialPolynomialKernel(MeasureTransform):
         lb = _as_1d(lb)
         ub = _as_1d(ub)
         if lb.size != p or ub.size != p:
-            raise ValueError("ThetaSpec.bounds must have lower and upper arrays of length N*(Ksig+1).")
+            raise ValueError(
+                "ThetaSpec.bounds must have lower and upper arrays "
+                "of length N*(Ksig+1)."
+            )
         return list(zip(lb, ub))
 
-    def _fit_one_maturity(self, hist_T: pd.DataFrame, *, T: float) -> Tuple[ExponentialPolynomialFitted, Dict[str, Any]]:
+    def _fit_one_maturity(
+        self,
+        hist_T: pd.DataFrame,
+        *,
+        T: float,
+    ) -> Tuple[ExponentialPolynomialFitted, Dict[str, Any]]:
         p = self._theta_dim()
         x0 = np.zeros(p, dtype=float) if self.x0 is None else self.x0.copy()
         if x0.size != p:
@@ -119,17 +333,18 @@ class ExponentialPolynomialKernel(MeasureTransform):
 
         def nll(theta):
             theta = _as_1d(theta)
-            total_ll = 0.0
             penalty = self.penalty_value
-
             if theta.size != p or not np.all(np.isfinite(theta)):
                 return penalty
 
+            total_ll = 0.0
             for _, row in hist_T.iterrows():
                 x_grid = _as_1d(row["x_grid"])
-
-                # Invalid grid means this parameter vector/observation pair is unusable.
-                if x_grid.size < 10 or np.any(~np.isfinite(x_grid)) or np.any(np.diff(x_grid) <= 0):
+                if (
+                    x_grid.size < 10
+                    or np.any(~np.isfinite(x_grid))
+                    or np.any(np.diff(x_grid) <= 0)
+                ):
                     return penalty
 
                 f_q = _trapz_normalize_density(x_grid, row["f_q"], eps=eps)
@@ -138,12 +353,12 @@ class ExponentialPolynomialKernel(MeasureTransform):
 
                 sigma = float(row.get("sigma", 1.0))
                 realized = float(row["realized_return"])
-
-                if not np.isfinite(sigma) or sigma <= 0 or not np.isfinite(realized):
+                if (
+                    not np.isfinite(sigma)
+                    or sigma <= 0
+                    or not np.isfinite(realized)
+                ):
                     return penalty
-
-                # If the realized return is outside the evaluation grid, the likelihood
-                # contribution is not trustworthy. Penalize instead of allowing nan/zero.
                 if realized < x_grid[0] or realized > x_grid[-1]:
                     return penalty
 
@@ -151,29 +366,24 @@ class ExponentialPolynomialKernel(MeasureTransform):
                 if g.size != x_grid.size or not np.all(np.isfinite(g)):
                     return penalty
 
-                # exp(-g) enters f_P. Clip to prevent overflow/underflow.
-                weight = np.exp(np.clip(-g, -700, 700))
-                raw = f_q * weight
-
-                mass = float(np.trapezoid(raw, x_grid))
-                if not np.isfinite(mass) or mass <= eps:
-                    return penalty
-
-                f_p = raw / mass
-                if f_p.size != x_grid.size or not np.all(np.isfinite(f_p)):
+                try:
+                    f_p = _physical_density_from_g(x_grid, f_q, g, eps=eps)
+                except (ValueError, FloatingPointError):
                     return penalty
 
                 f_at_realized = _safe_interp(realized, x_grid, f_p)
                 if not np.isfinite(f_at_realized) or f_at_realized <= eps:
                     return penalty
-
                 total_ll += np.log(f_at_realized)
 
             if not np.isfinite(total_ll):
                 return penalty
 
-            out = float(-total_ll)
-            return out if np.isfinite(out) else penalty
+            objective = (
+                float(-total_ll)
+                + self.ridge_penalty * float(np.dot(theta, theta))
+            )
+            return float(objective) if np.isfinite(objective) else penalty
 
         res = minimize(
             nll,
@@ -192,28 +402,65 @@ class ExponentialPolynomialKernel(MeasureTransform):
             message=str(res.message),
         )
 
-        # --------------------------------------------------------
-        # Interpret optimizer result
-        # --------------------------------------------------------
-
         if res.success:
             status = "success"
-        
-        elif (
-            np.all(np.isfinite(res.x))
-            and np.isfinite(res.fun)
-        ):
+        elif np.all(np.isfinite(res.x)) and np.isfinite(res.fun):
             status = "questionable"
-        
         else:
             status = "failed"
-        
+
+        theta_hat = np.asarray(res.x, dtype=float)
+        regularization_penalty = (
+            self.ridge_penalty * float(np.dot(theta_hat, theta_hat))
+            if np.all(np.isfinite(theta_hat))
+            else np.nan
+        )
+        unpenalized_nll = (
+            float(res.fun - regularization_penalty)
+            if np.isfinite(res.fun) and np.isfinite(regularization_penalty)
+            else np.nan
+        )
+
+        sigma_values = pd.to_numeric(
+            hist_T.get(
+                "sigma",
+                pd.Series(np.ones(len(hist_T)), index=hist_T.index),
+            ),
+            errors="coerce",
+        )
+        sigma_values = sigma_values[
+            np.isfinite(sigma_values) & (sigma_values > 0)
+        ]
+        representative_sigma = float(
+            np.median(sigma_values) if len(sigma_values) else 1.0
+        )
+        effective_coefficients = c_it(
+            representative_sigma,
+            unpack_theta(theta_hat, N, Ksig),
+        )
+
         diag = {
             "loss": float(res.fun),
-            "loss_name": "negative_log_likelihood",
+            "loss_name": (
+                "penalized_negative_log_likelihood"
+                if self.ridge_penalty > 0
+                else "negative_log_likelihood"
+            ),
+            "unpenalized_negative_log_likelihood": unpenalized_nll,
+            "regularization_penalty": float(regularization_penalty),
+            "ridge_penalty": float(self.ridge_penalty),
             "status": status,
             "message": str(res.message),
-            "params": {f"theta_{i}": float(v) for i, v in enumerate(res.x)},
+            "params": {
+                f"theta_{i}": float(value)
+                for i, value in enumerate(theta_hat)
+            },
+            "theta_l2_norm": float(np.linalg.norm(theta_hat)),
+            "representative_sigma": representative_sigma,
+            "effective_return_coefficients": {
+                f"c_{i + 1}": float(value)
+                for i, value in enumerate(effective_coefficients)
+            },
         }
         return fitted, diag
 
@@ -237,23 +484,99 @@ class ExponentialPolynomialKernel(MeasureTransform):
         Ksig = int(fitted_model.theta_spec.Ksig)
 
         g = g_r_sigma(x_grid, sigma, theta, N=N, Ksig=Ksig)
-
-        # Kernel is proportional to exp(g). Normalize so E_P[M] = 1 on the grid.
-        raw_kernel = np.exp(np.clip(g, -700, 700))
-
-        # Physical density is f_Q / M, normalized.
-        raw_f_p = f_q / np.maximum(raw_kernel, self.eps)
-        f_p = _trapz_normalize_density(x_grid, raw_f_p, eps=self.eps)
+        f_p = _physical_density_from_g(x_grid, f_q, g, eps=self.eps)
         F_p = _cdf_from_density(x_grid, f_p, eps=self.eps)
 
-        # dP/dQ
-        weight = f_p / np.maximum(f_q, self.eps)
+        effective_coefficients = c_it(
+            sigma,
+            unpack_theta(theta, N, Ksig),
+        )
 
-        # normalize M so ∫ M f_P dx = 1
-        M = f_q / np.maximum(f_p, self.eps)
-        Em = float(np.trapezoid(M * f_p, x_grid))
-        if np.isfinite(Em) and Em > self.eps:
-            M = M / Em
+        tiny = np.finfo(float).tiny
+        weight = np.full_like(f_p, np.nan, dtype=float)
+        valid_weight = np.isfinite(f_q) & np.isfinite(f_p) & (f_q > tiny)
+        weight[valid_weight] = f_p[valid_weight] / f_q[valid_weight]
+
+        # Construct and normalize M entirely in log space:
+        #
+        #   log E_P[exp(g)] = log integral exp(g) f_P dx
+        #   log M = g - log E_P[exp(g)]
+        #
+        # This avoids dividing by an extremely small normalization
+        # constant, which previously generated overflow warnings.
+        log_f_p = np.log(
+            np.maximum(
+                f_p,
+                np.finfo(float).tiny,
+            )
+        )
+
+        log_Em = _log_trapezoid_positive(
+            x_grid,
+            log_f_p + g,
+        )
+
+        log_M = g - log_Em
+
+        # Keep the stored kernel finite in float64. Any clipping is
+        # explicitly recorded below as a transform anomaly.
+        kernel_log_upper = 700.0
+        kernel_log_lower = -745.0
+
+        kernel_high_clip_count = int(
+            np.sum(log_M > kernel_log_upper)
+        )
+        kernel_low_clip_count = int(
+            np.sum(log_M < kernel_log_lower)
+        )
+
+        M = np.exp(
+            np.clip(
+                log_M,
+                kernel_log_lower,
+                kernel_log_upper,
+            )
+        )
+
+        if not np.all(np.isfinite(M)):
+            raise ValueError(
+                "Could not construct a finite pricing kernel."
+            )
+
+        kernel_normalization_check = float(
+            np.trapezoid(
+                M * f_p,
+                x_grid,
+            )
+        )
+
+        diagnostics = _transform_diagnostics(
+            x_grid=x_grid,
+            f_q=f_q,
+            f_p=f_p,
+            g=g,
+            theta=theta,
+            effective_coefficients=effective_coefficients,
+        )
+
+        diagnostics.update({
+            "pricing_kernel_log_normalizer": float(log_Em),
+            "pricing_kernel_log_min": float(np.min(log_M)),
+            "pricing_kernel_log_max": float(np.max(log_M)),
+            "pricing_kernel_high_clip_count": kernel_high_clip_count,
+            "pricing_kernel_low_clip_count": kernel_low_clip_count,
+            "pricing_kernel_log_upper": kernel_log_upper,
+            "pricing_kernel_log_lower": kernel_log_lower,
+            "pricing_kernel_normalization_check": (
+                kernel_normalization_check
+            ),
+        })
+
+        if kernel_high_clip_count > 0:
+            diagnostics["warnings"].append(
+                "pricing_kernel_exceeds_float64_safe_range"
+            )
+            diagnostics["anomaly"] = True
 
         return {
             "x_grid": x_grid,
@@ -263,20 +586,36 @@ class ExponentialPolynomialKernel(MeasureTransform):
             "F_p": F_p,
             "weight": weight,
             "pricing_kernel": M,
+            "log_pricing_kernel": log_M,
             "g": g,
             "theta_hat": theta,
             "T_fit": float(T),
+            "sigma": float(sigma),
+            "effective_return_coefficients": effective_coefficients,
+            "transform_diagnostics": diagnostics,
+            "transform_anomaly": bool(diagnostics["anomaly"]),
+            "transform_warnings": list(diagnostics["warnings"]),
         }
 
-def g_r_sigma(r: np.ndarray, sigma: float, theta: np.ndarray, *, N: int, Ksig: int) -> np.ndarray:
+
+def g_r_sigma(
+    r: np.ndarray,
+    sigma: float,
+    theta: np.ndarray,
+    *,
+    N: int,
+    Ksig: int,
+) -> np.ndarray:
     theta_mat = unpack_theta(theta, N, Ksig)
     c = c_it(float(sigma), theta_mat)
     powers = np.vstack([_as_1d(r) ** i for i in range(1, N + 1)]).T
     return powers @ c
 
+
 def unpack_theta(theta: np.ndarray, N: int, Ksig: int) -> np.ndarray:
     theta = _as_1d(theta)
     return theta.reshape((Ksig + 1, N), order="F")
+
 
 def c_it(sigma: float, theta_mat: np.ndarray) -> np.ndarray:
     Ksig = theta_mat.shape[0] - 1

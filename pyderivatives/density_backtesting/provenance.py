@@ -31,7 +31,7 @@ def describe_model(model):
         "name": getattr(model, "name", None),
     }
 
-    for attr in ("rnd_key", "physical_key", "requires_fit", "clone_transform"):
+    for attr in ("rnd_key", "physical_key", "requires_fit"):
         if hasattr(model, attr):
             out[attr] = getattr(model, attr)
 
@@ -39,6 +39,14 @@ def describe_model(model):
     if transform is not None:
         out["transform_class"] = transform.__class__.__name__
         out["transform_method"] = getattr(transform, "method_name", None)
+
+    calibration = getattr(model, "calibration", None)
+    if calibration is not None:
+        try:
+            from dataclasses import asdict
+            out["calibration"] = asdict(calibration)
+        except Exception:
+            out["calibration"] = str(calibration)
 
     return out
 

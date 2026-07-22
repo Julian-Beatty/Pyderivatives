@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Optional, Dict, Any
 
 from pyderivatives.pricing_kernel import get_transform
+from .config import TransformCalibrationSpec
 from .models import (
     RawRNDModel,
     PhysicalDensityModel,
@@ -39,7 +40,9 @@ def CRRA(
     rnd_key: str,
     gamma: float = 2.0,
     name: Optional[str] = None,
+    calibration: Optional[TransformCalibrationSpec] = None,
     behavioral: bool = False,
+    fit_kwargs: Optional[Dict[str, Any]] = None,
     transform_kwargs: Optional[Dict[str, Any]] = None,
     **metadata,
 ):
@@ -56,7 +59,13 @@ def CRRA(
         rnd_key=rnd_key,
         transform=transform,
         requires_fit=True,
-        clone_transform=True,
+        calibration=(
+            calibration
+            if calibration is not None
+            else TransformCalibrationSpec(
+                fit_kwargs={} if fit_kwargs is None else dict(fit_kwargs)
+            )
+        ),
         metadata=metadata,
     )
 
@@ -78,7 +87,6 @@ def RossRecovery(
         rnd_key=rnd_key,
         transform=transform,
         requires_fit=False,
-        clone_transform=True,
         metadata=metadata,
     )
 
@@ -87,6 +95,7 @@ def BetaCalibration(
     *,
     rnd_key: str,
     name: Optional[str] = None,
+    calibration: Optional[TransformCalibrationSpec] = None,
     fit_kwargs: Optional[Dict[str, Any]] = None,
     transform_kwargs: Optional[Dict[str, Any]] = None,
     **metadata,
@@ -101,8 +110,13 @@ def BetaCalibration(
         rnd_key=rnd_key,
         transform=transform,
         requires_fit=True,
-        clone_transform=True,
-        fit_kwargs={} if fit_kwargs is None else dict(fit_kwargs),
+        calibration=(
+            calibration
+            if calibration is not None
+            else TransformCalibrationSpec(
+                fit_kwargs={} if fit_kwargs is None else dict(fit_kwargs)
+            )
+        ),
         metadata=metadata,
     )
 
@@ -111,6 +125,7 @@ def ExponentialPolynomial(
     *,
     rnd_key: str,
     name: Optional[str] = None,
+    calibration: Optional[TransformCalibrationSpec] = None,
     fit_kwargs: Optional[Dict[str, Any]] = None,
     transform_kwargs: Optional[Dict[str, Any]] = None,
     **metadata,
@@ -125,8 +140,13 @@ def ExponentialPolynomial(
         rnd_key=rnd_key,
         transform=transform,
         requires_fit=True,
-        clone_transform=True,
-        fit_kwargs={} if fit_kwargs is None else dict(fit_kwargs),
+        calibration=(
+            calibration
+            if calibration is not None
+            else TransformCalibrationSpec(
+                fit_kwargs={} if fit_kwargs is None else dict(fit_kwargs)
+            )
+        ),
         metadata=metadata,
     )
 
@@ -135,6 +155,7 @@ def NonparametricCalibration(
     *,
     rnd_key: str,
     name: Optional[str] = None,
+    calibration: Optional[TransformCalibrationSpec] = None,
     fit_kwargs: Optional[Dict[str, Any]] = None,
     transform_kwargs: Optional[Dict[str, Any]] = None,
     **metadata,
@@ -149,8 +170,13 @@ def NonparametricCalibration(
         rnd_key=rnd_key,
         transform=transform,
         requires_fit=True,
-        clone_transform=True,
-        fit_kwargs={} if fit_kwargs is None else dict(fit_kwargs),
+        calibration=(
+            calibration
+            if calibration is not None
+            else TransformCalibrationSpec(
+                fit_kwargs={} if fit_kwargs is None else dict(fit_kwargs)
+            )
+        ),
         metadata=metadata,
     )
 
@@ -160,14 +186,18 @@ def HistoricalKDE(
     name: str = "Historical KDE",
     grid_size: int = 500,
     grid_pad: float = 0.25,
+    calibration: Optional[TransformCalibrationSpec] = None,
     **metadata,
 ):
     return HistoricalKDEModel(
         name=name,
         grid_size=grid_size,
         grid_pad=grid_pad,
+        calibration=calibration,
         metadata=metadata,
     )
+
+
 def GARCH(
     *,
     name: str = "GARCH(1,1)-t",
@@ -179,6 +209,7 @@ def GARCH(
     grid_pad: float = 0.25,
     random_state: Optional[int] = 123,
     scale_returns: float = 100.0,
+    calibration: Optional[TransformCalibrationSpec] = None,
     **metadata,
 ):
     from .models import GARCHModel
@@ -193,5 +224,6 @@ def GARCH(
         grid_pad=grid_pad,
         random_state=random_state,
         scale_returns=scale_returns,
+        calibration=calibration,
         metadata=metadata,
     )

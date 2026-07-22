@@ -259,6 +259,9 @@ class FitDiagnostics:
     n_used: int
     n_dropped: int
 
+    # True if only non-overlapping forecast windows were used.
+    non_overlapping: bool = False
+
     loss: float = np.nan
     loss_name: str = "not_applicable"
 
