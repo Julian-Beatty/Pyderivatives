@@ -88,7 +88,11 @@ class EvaluationConfig:
     realized_horizon_mode: str = "trading"   # "trading" or "calendar"
     realized_match_tol_days: int = 3
 
-    evaluation_strategy: str = "all"         # "all", "single_path", or "shared_path"
+    # ``staggered_paths`` is a cluster-planning strategy: feasible dates are
+    # partitioned before model fitting and only dates belonging to retained
+    # non-overlapping paths are sent to workers.
+    evaluation_strategy: str = "all"
+    staggered_min_obs: int = 5
     date_alignment: str = "model_specific"    # "model_specific", "intersection", or "reference"
     date_alignment_reference_model: Optional[str] = None
 
@@ -161,10 +165,19 @@ class EvaluationConfig:
                     "or path_reference_model."
                 )
 
-        if self.evaluation_strategy not in {"all", "single_path", "shared_path"}:
+        if self.evaluation_strategy not in {
+            "all",
+            "single_path",
+            "shared_path",
+            "staggered_paths",
+        }:
             raise ValueError(
-                "evaluation_strategy must be 'all', 'single_path', or 'shared_path'."
+                "evaluation_strategy must be 'all', 'single_path', "
+                "'shared_path', or 'staggered_paths'."
             )
+
+        if int(self.staggered_min_obs) < 1:
+            raise ValueError("staggered_min_obs must be at least 1.")
         
 
 

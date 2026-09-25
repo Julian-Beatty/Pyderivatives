@@ -202,9 +202,15 @@ class MeasureTransform(HistoryMixin, BehavioralOverlayMixin, BootstrapMixin, ABC
         adjustment_factor_col: Optional[str] = None,
         return_col: Optional[str] = None,
         non_overlapping: bool = False,
+        realized_cutoff_date: Optional[Any] = None,
 
     ):
         non_overlapping = bool(non_overlapping)
+        realized_cutoff_ts = None
+        if realized_cutoff_date is not None:
+            realized_cutoff_ts = pd.Timestamp(realized_cutoff_date)
+            if realized_cutoff_ts.tzinfo is not None:
+                realized_cutoff_ts = realized_cutoff_ts.tz_localize(None)
 
         if stock_df is not None:
             self.stock_df = stock_df.copy()
@@ -253,6 +259,7 @@ class MeasureTransform(HistoryMixin, BehavioralOverlayMixin, BootstrapMixin, ABC
                 "theta_min": self.theta_min,
                 "theta_max": self.theta_max,
                 "non_overlapping": non_overlapping,
+                "realized_cutoff_date": realized_cutoff_ts,
             })
 
             cached = _cache_load(self.cache_spec.folder, fit_cache_key)
@@ -280,9 +287,30 @@ class MeasureTransform(HistoryMixin, BehavioralOverlayMixin, BootstrapMixin, ABC
 
         for T in self._select_fit_maturities(history_by_T):
             hist_T = history_by_T[T].copy()
-        
+
+            # Real-time availability filter. An RND observation is usable only
+            # after its realized-return horizon has fully completed. This is
+            # maturity-specific because each T has a different end_date.
+            if realized_cutoff_ts is not None:
+                if "end_date" not in hist_T.columns:
+                    raise KeyError(
+                        "realized_cutoff_date requires history column 'end_date'."
+                    )
+
+                end_dates = pd.to_datetime(
+                    hist_T["end_date"],
+                    errors="coerce",
+                )
+                if getattr(end_dates.dt, "tz", None) is not None:
+                    end_dates = end_dates.dt.tz_localize(None)
+
+                hist_T = hist_T.loc[
+                    end_dates.notna()
+                    & (end_dates <= realized_cutoff_ts)
+                ].copy()
+
             n_before_overlap_filter = int(len(hist_T))
-        
+
             if non_overlapping:
                 hist_T = self._select_non_overlapping_history(hist_T)
         
@@ -437,6 +465,30 @@ class MeasureTransform(HistoryMixin, BehavioralOverlayMixin, BootstrapMixin, ABC
             info=info or {},
         )
 
+    def _transform_candidate_indices(self, T_grid: np.ndarray) -> list[int]:
+        """Return only maturity rows that can use one of the fitted models.
+
+        In targeted single-maturity fits, ``models_by_T_`` usually contains one
+        tenor.  Skipping the other target-date rows avoids repeatedly attempting
+        maturity matches that are guaranteed to fail.  When no maturity tolerance
+        is configured, preserve the legacy behavior and transform every row.
+        """
+        T_grid = _as_1d(T_grid).astype(float)
+        if T_grid.size == 0:
+            return []
+        if not self.models_by_T_:
+            return []
+        if self.maturity_match_tol is None:
+            return list(range(T_grid.size))
+
+        fitted = np.asarray(sorted(self.models_by_T_.keys()), dtype=float)
+        out: list[int] = []
+        for j, T in enumerate(T_grid):
+            err = float(np.min(np.abs(fitted - float(T))))
+            if err <= float(self.maturity_match_tol):
+                out.append(j)
+        return out
+
     def _transform_info_no_bootstrap(self, info: dict) -> dict:
         x_grid, rnd_lr_surface, cdf_lr_surface, T_grid = self._extract_surfaces(info)
         S0 = _find_spot(info, self.key_spec.spot_keys)
@@ -457,8 +509,23 @@ class MeasureTransform(HistoryMixin, BehavioralOverlayMixin, BootstrapMixin, ABC
 
         status_by_T = []
 
+        candidate_indices = self._transform_candidate_indices(T_grid)
+        candidate_set = set(candidate_indices)
+
+        # Record skipped maturities explicitly for diagnostics, but do not attempt
+        # expensive transformations for rows that cannot match a fitted tenor.
         for j, T in enumerate(T_grid):
-            T = float(T)
+            if j not in candidate_set:
+                status_by_T.append(
+                    {
+                        "T": float(T),
+                        "matched_T": np.nan,
+                        "status": "not_requested",
+                    }
+                )
+
+        for j in candidate_indices:
+            T = float(T_grid[j])
 
             try:
                 T_fit = self._match_maturity(T)

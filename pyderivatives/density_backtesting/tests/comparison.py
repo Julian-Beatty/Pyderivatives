@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -13,6 +12,7 @@ from .bootstrap_inference import (
     store_bootstrap_distribution,
     two_sided_centered_mean_cbb,
 )
+from ..scoring import score_direction, stationarity_diagnostics
 
 
 def _newey_west_variance(x, max_lag: int):
@@ -25,7 +25,7 @@ def _newey_west_variance(x, max_lag: int):
     centered = x - np.mean(x)
     lrv = np.sum(centered * centered) / n
 
-    for lag in range(1, int(max_lag) + 1):
+    for lag in range(1, min(int(max_lag), n - 1) + 1):
         covariance = np.sum(centered[lag:] * centered[:-lag]) / n
         weight = 1.0 - lag / (max_lag + 1.0)
         lrv += 2.0 * weight * covariance
@@ -123,16 +123,12 @@ def _comparison_inference(
 def _comparison_frames(dataset, model_a: str, model_b: str, *, columns):
     horizons = sorted(
         set(
-            dataset.get_model(
-                model_a,
-                require_nonempty=False,
-            )["horizon"].dropna().unique()
+            dataset.get_model(model_a, require_nonempty=False)["horizon"]
+            .dropna().unique()
         )
         & set(
-            dataset.get_model(
-                model_b,
-                require_nonempty=False,
-            )["horizon"].dropna().unique()
+            dataset.get_model(model_b, require_nonempty=False)["horizon"]
+            .dropna().unique()
         )
     )
 
@@ -148,31 +144,38 @@ def _comparison_frames(dataset, model_a: str, model_b: str, *, columns):
             yield int(horizon), frame
 
 
+def _oriented_scores(frame, score: str):
+    a = frame[f"{score}_a"].to_numpy(dtype=float)
+    b = frame[f"{score}_b"].to_numpy(dtype=float)
+    direction = score_direction(score)
+    return direction * a, direction * b, a, b, direction
+
+
 def _direction_metadata(
     *,
     model_a: str,
     model_b: str,
-    score_a,
-    score_b,
+    score_name: str,
+    oriented_a,
+    oriented_b,
+    raw_a,
+    raw_b,
     weighted_a=None,
     weighted_b=None,
 ):
-    score_a = np.asarray(score_a, dtype=float)
-    score_b = np.asarray(score_b, dtype=float)
+    oriented_a = np.asarray(oriented_a, dtype=float)
+    oriented_b = np.asarray(oriented_b, dtype=float)
+    raw_a = np.asarray(raw_a, dtype=float)
+    raw_b = np.asarray(raw_b, dtype=float)
 
     if weighted_a is None:
-        weighted_a = score_a
+        weighted_a = oriented_a
     if weighted_b is None:
-        weighted_b = score_b
+        weighted_b = oriented_b
 
     weighted_a = np.asarray(weighted_a, dtype=float)
     weighted_b = np.asarray(weighted_b, dtype=float)
-
-    mean_a = float(np.nanmean(score_a))
-    mean_b = float(np.nanmean(score_b))
-    mean_weighted_a = float(np.nanmean(weighted_a))
-    mean_weighted_b = float(np.nanmean(weighted_b))
-    difference = float(mean_weighted_a - mean_weighted_b)
+    difference = float(np.nanmean(weighted_a) - np.nanmean(weighted_b))
 
     if difference > 0:
         winner, loser = model_a, model_b
@@ -182,17 +185,21 @@ def _direction_metadata(
         winner, loser = None, None
 
     return {
-        "mean_log_score_model_a": mean_a,
-        "mean_log_score_model_b": mean_b,
-        "mean_raw_score_diff_a_minus_b": float(mean_a - mean_b),
-        "mean_weighted_log_score_model_a": mean_weighted_a,
-        "mean_weighted_log_score_model_b": mean_weighted_b,
+        "score_name": score_name,
+        "score_higher_is_better": bool(score_direction(score_name) > 0),
+        "mean_raw_value_model_a": float(np.nanmean(raw_a)),
+        "mean_raw_value_model_b": float(np.nanmean(raw_b)),
+        "mean_oriented_score_model_a": float(np.nanmean(oriented_a)),
+        "mean_oriented_score_model_b": float(np.nanmean(oriented_b)),
+        "mean_oriented_score_diff_a_minus_b": float(
+            np.nanmean(oriented_a) - np.nanmean(oriented_b)
+        ),
+        "mean_weighted_oriented_score_model_a": float(np.nanmean(weighted_a)),
+        "mean_weighted_oriented_score_model_b": float(np.nanmean(weighted_b)),
         "mean_weighted_score_diff_a_minus_b": difference,
         "winner": winner,
         "loser": loser,
-        "direction_rule": (
-            "Positive A-minus-B score difference means model_a is better."
-        ),
+        "direction_rule": "Positive A-minus-B means model_a is better.",
     }
 
 
@@ -223,6 +230,7 @@ def _tail_weights_from_pit(pit, *, alpha_level: float, side: str):
 class _ComparisonBase(DensityTest):
     model_a: str = ""
     model_b: str = ""
+    score: str = "log_score"
     correction: str = "newey-west"
     max_lag: Optional[int] = None
     block_length: Optional[int] = None
@@ -231,6 +239,10 @@ class _ComparisonBase(DensityTest):
     bootstrap_storage: BootstrapStorageSpec = field(
         default_factory=BootstrapStorageSpec
     )
+    check_stationarity: bool = False
+    stationarity_alpha: float = 0.05
+    stationarity_min_obs: int = 20
+    stationarity_action: str = "warn"  # warn, fail, or ignore
 
     def _result_from_difference(
         self,
@@ -238,8 +250,33 @@ class _ComparisonBase(DensityTest):
         horizon: int,
         difference,
         metadata: dict,
+        score_a=None,
+        score_b=None,
     ):
         label = f"{self.model_a} vs {self.model_b}"
+        difference = np.asarray(difference, dtype=float)
+
+        stationarity = None
+        assumption_met = None
+        if self.check_stationarity:
+            stationarity = {
+                "model_a_score": stationarity_diagnostics(
+                    score_a if score_a is not None else difference,
+                    alpha=self.stationarity_alpha,
+                    min_obs=self.stationarity_min_obs,
+                ),
+                "model_b_score": stationarity_diagnostics(
+                    score_b if score_b is not None else difference,
+                    alpha=self.stationarity_alpha,
+                    min_obs=self.stationarity_min_obs,
+                ),
+                "score_differential": stationarity_diagnostics(
+                    difference,
+                    alpha=self.stationarity_alpha,
+                    min_obs=self.stationarity_min_obs,
+                ),
+            }
+            assumption_met = stationarity["score_differential"]["stationary"]
 
         inference = _comparison_inference(
             difference,
@@ -262,7 +299,24 @@ class _ComparisonBase(DensityTest):
                 else None
             ),
             "bootstrap_standard_error": inference["standard_error"],
+            "stationarity_checked": bool(self.check_stationarity),
+            "stationarity_action": self.stationarity_action,
+            "stationarity_assumption_met": assumption_met,
+            "stationarity_diagnostics": stationarity,
+            "stationarity_note": (
+                "AG asymptotics require a covariance-stationary score differential; "
+                "ADF and KPSS are reported as complementary diagnostics."
+                if self.check_stationarity else None
+            ),
         }
+
+        invalid_for_stationarity = (
+            self.check_stationarity
+            and self.stationarity_action == "fail"
+            and assumption_met is not True
+        )
+        if self.stationarity_action not in {"warn", "fail", "ignore"}:
+            raise ValueError("stationarity_action must be 'warn', 'fail', or 'ignore'.")
 
         bootstrap = inference["bootstrap"]
         if bootstrap is not None:
@@ -278,13 +332,11 @@ class _ComparisonBase(DensityTest):
         return self.result(
             model_name=label,
             statistic=(
-                None
-                if not np.isfinite(inference["statistic"])
+                None if invalid_for_stationarity or not np.isfinite(inference["statistic"])
                 else float(inference["statistic"])
             ),
             pvalue=(
-                None
-                if not np.isfinite(inference["pvalue"])
+                None if invalid_for_stationarity or not np.isfinite(inference["pvalue"])
                 else float(inference["pvalue"])
             ),
             distribution=(
@@ -293,20 +345,14 @@ class _ComparisonBase(DensityTest):
                 else "normal"
             ),
             sample_size=int(inference["n"]),
-            effect_size=float(inference["mean_difference"]),
+            effect_size=(
+                None if not np.isfinite(inference["mean_difference"])
+                else float(inference["mean_difference"])
+            ),
             metadata=result_metadata,
         )
 
-
-@dataclass(frozen=True)
-class DieboldMariano(_ComparisonBase):
-    test_id: str = "diebold_mariano"
-    test_name: str = "Diebold-Mariano log-score comparison"
-    category: str = "comparison"
-    null: str = "Equal predictive accuracy."
-    alternative: str = "Unequal predictive accuracy."
-
-    def evaluate(self, dataset):
+    def _evaluate_score(self, dataset):
         output = []
         found = False
 
@@ -314,16 +360,18 @@ class DieboldMariano(_ComparisonBase):
             dataset,
             self.model_a,
             self.model_b,
-            columns=["log_score", "horizon"],
+            columns=[self.score, "horizon"],
         ):
             found = True
-            score_a = frame["log_score_a"].to_numpy(dtype=float)
-            score_b = frame["log_score_b"].to_numpy(dtype=float)
-
+            oriented_a, oriented_b, raw_a, raw_b, _ = _oriented_scores(
+                frame, self.score
+            )
             output.append(
                 self._result_from_difference(
                     horizon=horizon,
-                    difference=score_a - score_b,
+                    difference=oriented_a - oriented_b,
+                    score_a=oriented_a,
+                    score_b=oriented_b,
                     metadata={
                         "horizon": horizon,
                         "model_a": self.model_a,
@@ -331,8 +379,11 @@ class DieboldMariano(_ComparisonBase):
                         **_direction_metadata(
                             model_a=self.model_a,
                             model_b=self.model_b,
-                            score_a=score_a,
-                            score_b=score_b,
+                            score_name=self.score,
+                            oriented_a=oriented_a,
+                            oriented_b=oriented_b,
+                            raw_a=raw_a,
+                            raw_b=raw_b,
                         ),
                     },
                 )
@@ -345,19 +396,39 @@ class DieboldMariano(_ComparisonBase):
                     statistic=None,
                     pvalue=None,
                     sample_size=0,
-                    metadata={"message": "No common dates."},
+                    metadata={
+                        "message": "No common dates or requested score is unavailable.",
+                        "score_name": self.score,
+                    },
                 )
             )
-
         return output
 
 
 @dataclass(frozen=True)
-class AmisanoGiacomini(DieboldMariano):
+class DieboldMariano(_ComparisonBase):
+    test_id: str = "diebold_mariano"
+    test_name: str = "Diebold-Mariano score comparison"
+    category: str = "comparison"
+    null: str = "Equal predictive accuracy."
+    alternative: str = "Unequal predictive accuracy."
+
+    def evaluate(self, dataset):
+        return self._evaluate_score(dataset)
+
+
+@dataclass(frozen=True)
+class AmisanoGiacomini(_ComparisonBase):
+    check_stationarity: bool = True
+
     test_id: str = "amisano_giacomini"
-    test_name: str = "Amisano-Giacomini weighted likelihood ratio test"
-    null: str = "Equal average weighted log score."
-    alternative: str = "Unequal average weighted log score."
+    test_name: str = "Amisano-Giacomini score comparison"
+    category: str = "comparison"
+    null: str = "Equal average oriented score."
+    alternative: str = "Unequal average oriented score."
+
+    def evaluate(self, dataset):
+        return self._evaluate_score(dataset)
 
 
 @dataclass(frozen=True)
@@ -365,12 +436,13 @@ class TailWeightedAmisanoGiacomini(_ComparisonBase):
     alpha_level: float = 0.10
     side: str = "left"
     weight_on: str = "model_a_pit"
+    check_stationarity: bool = True
 
     test_id: str = "tail_weighted_ag"
-    test_name: str = "Tail-weighted Amisano-Giacomini test"
+    test_name: str = "Tail-weighted Amisano-Giacomini score comparison"
     category: str = "comparison"
-    null: str = "Equal average tail-weighted log score."
-    alternative: str = "Unequal average tail-weighted log score."
+    null: str = "Equal average tail-weighted oriented score."
+    alternative: str = "Unequal average tail-weighted oriented score."
 
     def evaluate(self, dataset):
         output = []
@@ -380,7 +452,7 @@ class TailWeightedAmisanoGiacomini(_ComparisonBase):
             dataset,
             self.model_a,
             self.model_b,
-            columns=["log_score", "pit", "horizon"],
+            columns=[self.score, "pit", "horizon"],
         ):
             found = True
 
@@ -405,15 +477,18 @@ class TailWeightedAmisanoGiacomini(_ComparisonBase):
                 side=self.side,
             )
 
-            score_a = frame["log_score_a"].to_numpy(dtype=float)
-            score_b = frame["log_score_b"].to_numpy(dtype=float)
-            weighted_a = weights * score_a
-            weighted_b = weights * score_b
+            oriented_a, oriented_b, raw_a, raw_b, _ = _oriented_scores(
+                frame, self.score
+            )
+            weighted_a = weights * oriented_a
+            weighted_b = weights * oriented_b
 
             output.append(
                 self._result_from_difference(
                     horizon=horizon,
                     difference=weighted_a - weighted_b,
+                    score_a=weighted_a,
+                    score_b=weighted_b,
                     metadata={
                         "horizon": horizon,
                         "model_a": self.model_a,
@@ -427,8 +502,11 @@ class TailWeightedAmisanoGiacomini(_ComparisonBase):
                         **_direction_metadata(
                             model_a=self.model_a,
                             model_b=self.model_b,
-                            score_a=score_a,
-                            score_b=score_b,
+                            score_name=self.score,
+                            oriented_a=oriented_a,
+                            oriented_b=oriented_b,
+                            raw_a=raw_a,
+                            raw_b=raw_b,
                             weighted_a=weighted_a,
                             weighted_b=weighted_b,
                         ),
@@ -443,7 +521,10 @@ class TailWeightedAmisanoGiacomini(_ComparisonBase):
                     statistic=None,
                     pvalue=None,
                     sample_size=0,
-                    metadata={"message": "No common dates."},
+                    metadata={
+                        "message": "No common dates or requested score is unavailable.",
+                        "score_name": self.score,
+                    },
                 )
             )
 

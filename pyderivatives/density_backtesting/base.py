@@ -26,6 +26,17 @@ class ForecastDensity:
         pdf_val = np.interp(self.realized, self.x_grid, self.pdf)
         return float(np.log(max(pdf_val, 1e-300)))
 
+    def scores(self, config=None) -> Dict[str, float]:
+        """Return all configured proper and diagnostic density scores."""
+        from .scoring import score_density
+        return score_density(
+            x_grid=self.x_grid,
+            pdf=self.pdf,
+            cdf=self.cdf,
+            realized=self.realized,
+            config=config,
+        )
+
 
 @dataclass
 class EvaluationError:

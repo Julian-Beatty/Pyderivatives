@@ -11,7 +11,6 @@ from . import option_market_standardizer
 from . import arbitrage_repair
 from . import post_estimation
 from . import pricing_kernel
-from . import density_evaluation
 from . import dealer_positioning
 
 # =========================================================
@@ -68,7 +67,8 @@ from .arbitrage_repair import (
 )
 
 from .arbitrage_repair import (
-    plot_surface,
+    plot_repair_surface,
+    plot_repair_panels,
     plot_panels,
     plot_perturb,
     plot_term,

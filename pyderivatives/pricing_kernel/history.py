@@ -10,6 +10,7 @@ import copy
 from .utils import (
     _as_1d,
     _safe_interp,
+    _cdf_from_density,
     _find_spot,
     _find_sigma,
 )
@@ -23,6 +24,53 @@ class HistoryMixin:
     maturity-specific fitting datasets used by all pricing-kernel transforms.
     """
 
+    def _selected_maturity_indices(self, T_grid: np.ndarray) -> list[tuple[int, float, float]]:
+        """
+        Return maturity rows that should be used to construct calibration history.
+
+        Returns tuples ``(row_index, output_T, source_T)``.  When
+        ``self.fit_maturities`` is ``None`` this preserves the historical
+        behavior and returns every maturity.  When one or more fitting
+        maturities are requested, only the nearest matching row for each
+        requested maturity is returned.
+
+        The key optimization is that filtering happens *before* PIT/CDF
+        construction.  Therefore a 30-day calibration no longer constructs
+        histories for every tenor on every date.
+        """
+        available = _as_1d(T_grid).astype(float)
+        if available.size == 0:
+            return []
+
+        if self.fit_maturities is None:
+            return [(j, float(T), float(T)) for j, T in enumerate(available)]
+
+        selected: list[tuple[int, float, float]] = []
+        seen_indices: set[int] = set()
+
+        for T_req_raw in self.fit_maturities:
+            T_req = float(T_req_raw)
+            j = int(np.argmin(np.abs(available - T_req)))
+            source_T = float(available[j])
+            err = abs(source_T - T_req)
+
+            if self.maturity_match_tol is not None and err > self.maturity_match_tol:
+                # A particular historical date may not contain the requested
+                # observed tenor.  Skip that date/maturity rather than silently
+                # borrowing a materially different horizon.
+                continue
+
+            if j in seen_indices:
+                continue
+
+            # Use the requested maturity as the history key.  This keeps one
+            # consistent calibration panel even if the stored T has tiny floating
+            # point differences across dates.  ``source_T`` records the actual row.
+            selected.append((j, T_req, source_T))
+            seen_indices.add(j)
+
+        return selected
+
     def build_history_by_maturity(
         self,
         rnd_history_dict: Dict[Any, dict],
@@ -33,6 +81,13 @@ class HistoryMixin:
 
         For maturity T, the realized return is the cumulative log return from
         the anchor date to approximately 365*T calendar days ahead.
+
+        Performance
+        -----------
+        If ``self.fit_maturities`` is set, only those requested maturity slices
+        are processed.  This is important for rolling single-horizon backtests:
+        Beta/KDE/ExpPoly no longer build PIT histories for the full RND term
+        structure when only one observed maturity will be fitted.
         """
         ret_series = self._standardize_return_series(logreturns)
 
@@ -40,10 +95,12 @@ class HistoryMixin:
         if not keys:
             raise ValueError("rnd_history_dict is empty.")
 
-        first_info = rnd_history_dict[keys[0]]
-        T_grid = _as_1d(first_info[self.key_spec.T_grid_key])
-
-        rows_by_T: Dict[float, list] = {float(T): [] for T in T_grid}
+        # In targeted mode initialize only the requested panels.  In full-surface
+        # mode retain the original behavior and discover maturities from the data.
+        rows_by_T: Dict[float, list] = {}
+        if self.fit_maturities is not None:
+            for T in self.fit_maturities:
+                rows_by_T.setdefault(float(T), [])
 
         for raw_date in keys:
             date = pd.Timestamp(raw_date).tz_localize(None)
@@ -52,14 +109,31 @@ class HistoryMixin:
             if not info.get("success", True):
                 continue
 
-            x_grid, rnd_lr_surface, cdf_lr_surface, T_grid_i = self._extract_surfaces(info)
+            ks = self.key_spec
+            x_grid = _as_1d(info[ks.x_grid_key])
+            rnd_lr_surface = np.asarray(info[ks.pdf_surface_key], dtype=float)
+            T_grid_i = _as_1d(info[ks.T_grid_key]).astype(float)
+
+            if rnd_lr_surface.ndim != 2:
+                raise ValueError("RND surface must be a 2-D array.")
+            if rnd_lr_surface.shape[0] != T_grid_i.size:
+                raise ValueError(
+                    "RND surface maturity dimension does not match T_grid: "
+                    f"{rnd_lr_surface.shape[0]} != {T_grid_i.size}."
+                )
+
+            selected_rows = self._selected_maturity_indices(T_grid_i)
+            if not selected_rows:
+                continue
 
             sigma = _find_sigma(info, self.key_spec.sigma_keys, default=1.0)
             S0 = _find_spot(info, self.key_spec.spot_keys)
 
-            for j, T in enumerate(T_grid_i):
-                T = float(T)
-                horizon_days = max(1, int(round(365.0 * T)))
+            for j, output_T, source_T in selected_rows:
+                # The realized horizon follows the actual RND slice used on this
+                # historical date.  With the usual 0.51-day tolerance this is the
+                # same observed tenor up to harmless floating point differences.
+                horizon_days = max(1, int(round(365.0 * source_T)))
 
                 realized_return, end_date = self._realized_horizon_return(
                     ret_series,
@@ -70,27 +144,24 @@ class HistoryMixin:
                 if not np.isfinite(realized_return):
                     continue
 
-                f_q = rnd_lr_surface[j, :]
-                F_q = cdf_lr_surface[j, :]
-
+                f_q = np.asarray(rnd_lr_surface[j, :], dtype=float)
+                F_q = _cdf_from_density(x_grid, f_q, eps=1e-14)
                 pit = _safe_interp(realized_return, x_grid, F_q)
 
                 if not np.isfinite(pit):
                     continue
 
-                rows_by_T.setdefault(T, []).append(
+                rows_by_T.setdefault(float(output_T), []).append(
                     {
                         "date": date,
                         "end_date": end_date,
-                        "T": T,
+                        "T": float(output_T),
+                        "source_T": float(source_T),
                         "horizon_days": horizon_days,
                         "realized_return": float(realized_return),
                         "pit": float(np.clip(pit, self.eps, 1.0 - self.eps)),
                         "sigma": float(sigma),
                         "S0": np.nan if S0 is None else float(S0),
-                        # Preserve the daily Q-model state for stochastic-dynamics
-                        # measure transforms. Existing density-only transforms simply
-                        # ignore these additional columns.
                         "model": info.get("model", None),
                         "params": info.get("params", None),
                         "r": info.get("r", np.nan),
@@ -106,6 +177,7 @@ class HistoryMixin:
             "date",
             "end_date",
             "T",
+            "source_T",
             "horizon_days",
             "realized_return",
             "pit",
@@ -516,10 +588,27 @@ def fit_transform_window(
             f"< min_fit_dates={int(min_fit_dates)}."
         )
 
+    # Rolling and expanding windows must be strictly real-time: an RND can
+    # enter the calibration only when its realized horizon has completed by
+    # the target date. Centered and fixed windows are intentionally ex-post,
+    # so their information cutoff is the fitting-window end date.
+    realized_cutoff_date = (
+        target_ts
+        if mode in {"rolling", "expanding"}
+        else fit_end
+    )
+
+    if "realized_cutoff_date" in fit_kwargs:
+        raise ValueError(
+            "Do not supply realized_cutoff_date in fit_kwargs; "
+            "fit_transform_window determines it automatically from mode."
+        )
+
     fitted_transform = copy.deepcopy(transform)
     fitted_transform.fit(
         fit_rnd,
         stock_df=stock_df,
+        realized_cutoff_date=realized_cutoff_date,
         **fit_kwargs,
     )
 
@@ -732,8 +821,25 @@ def transform_history(
                 continue
 
             candidate_transform = copy.deepcopy(transform)
+            realized_cutoff_date = (
+                target_date
+                if mode in {"rolling", "expanding"}
+                else fit_end
+            )
+
+            if "realized_cutoff_date" in fit_kwargs:
+                raise ValueError(
+                    "Do not supply realized_cutoff_date in fit_kwargs; "
+                    "transform_history determines it automatically from mode."
+                )
+
             try:
-                candidate_transform.fit(fit_rnd, stock_df=stock_df, **fit_kwargs)
+                candidate_transform.fit(
+                    fit_rnd,
+                    stock_df=stock_df,
+                    realized_cutoff_date=realized_cutoff_date,
+                    **fit_kwargs,
+                )
             except Exception as exc:
                 if on_error == "raise":
                     raise

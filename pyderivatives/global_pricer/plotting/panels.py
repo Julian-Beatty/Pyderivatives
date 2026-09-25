@@ -360,7 +360,18 @@ def iv_panels(
     dpi: int = 300,
     show: bool = True,
     figsize_per_panel: float = 2.2,
+    raw_df=None,
+    raw_iv_col: str = "impl_volatility",
+    raw_strike_col: str = "strike",
+    raw_maturity_col: str = "rounded_maturity",
+    maturity_tol: float = 1e-10,
 ):
+    """Plot model IV with optional vendor IV dots from a single-date DataFrame.
+
+    Raw IV must be in decimal units (0.8 means 80%). Pass the original
+    market rows, not IV recalculated from repaired prices. Nonpositive and
+    nonfinite vendor IV values are omitted. Maturities are in years.
+    """
     if "iv_surface" not in res:
         raise KeyError("Missing IV surface. Expected res['iv_surface'].")
 
@@ -379,8 +390,36 @@ def iv_panels(
     if iv.shape != (T_grid.size, x.size):
         raise ValueError(f"iv_surface has shape {iv.shape}, expected {(T_grid.size, x.size)}.")
 
+    raw = None
+    if raw_df is not None:
+        import pandas as pd
+
+        if not np.isfinite(maturity_tol) or maturity_tol < 0:
+            raise ValueError("maturity_tol must be finite and nonnegative.")
+        required = [raw_strike_col, raw_maturity_col, raw_iv_col]
+        missing = [col for col in required if col not in raw_df]
+        if missing:
+            raise ValueError(f"Raw IV overlay is missing columns: {missing}")
+        if "date" in raw_df and raw_df["date"].nunique(dropna=False) > 1:
+            raise ValueError("raw_df must contain only the calibration date.")
+        if "date" in raw_df and len(raw_df) and res.get("date") is not None:
+            if pd.Timestamp(raw_df["date"].iloc[0]).normalize() != pd.Timestamp(res["date"]).normalize():
+                raise ValueError("raw_df date must match the model date.")
+        rk, rt, rv = (pd.to_numeric(raw_df[col], errors="coerce").to_numpy(float)
+                      for col in required)
+        valid = np.isfinite(rk) & np.isfinite(rt) & np.isfinite(rv) & (rk > 0) & (rt > 0) & (rv > 0)
+        rk, rt, rv = rk[valid], rt[valid], rv[valid]
+        if x_axis != "k":
+            spot = float(res["S0"])
+            if not np.isfinite(spot) or spot <= 0:
+                raise ValueError("A positive finite S0 is required for raw IV moneyness.")
+            rk = rk / spot if x_axis == "r" else np.log(rk / spot)
+        raw = rk, rt, rv
+
     xmask = _x_mask(x, x_bounds)
     x_plot = x[xmask]
+    if not x_plot.size:
+        raise ValueError("x_bounds excludes the entire model IV grid.")
 
     idxT = _pick_panel_indices(T_grid, n_panels)
     n_actual = len(idxT)
@@ -399,7 +438,13 @@ def iv_panels(
     }[x_axis]
 
     for ax, j in zip(axes[:n_actual], idxT):
-        ax.plot(x_plot, iv[j, xmask], linewidth=2.0)
+        ax.plot(x_plot, iv[j, xmask], linewidth=2.0, label="Model IV")
+        if raw is not None:
+            rk, rt, rv = raw
+            mask = np.isclose(rt, T_grid[j], rtol=0.0, atol=maturity_tol)
+            mask &= _x_mask(rk, x_bounds)
+            ax.scatter(rk[mask], rv[mask], s=20, alpha=0.75, label="Raw market IV")
+            ax.legend()
         ax.set_title(f"T = {float(T_grid[j]):.5g} yr")
         ax.set_ylabel("Implied vol")
         ax.grid(True, alpha=0.25)

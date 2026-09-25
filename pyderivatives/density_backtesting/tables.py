@@ -51,8 +51,9 @@ def score_table(
     *,
     horizon: Optional[int] = None,
     models: Optional[Sequence[str]] = None,
+    score: Optional[str] = None,
 ) -> pd.DataFrame:
-    df = report.dataset.score_summary()
+    df = report.dataset.score_summary(score=score)
 
     if df.empty:
         return df

@@ -115,9 +115,23 @@ def run_backtest(
     config.validate()
     horizons = config.resolved_horizons()
 
-    if config.evaluation_strategy in {"single_path", "shared_path"} and len(horizons) != 1:
+    if config.evaluation_strategy in {
+        "single_path",
+        "shared_path",
+        "staggered_paths",
+    } and len(horizons) != 1:
         raise ValueError(
             f"{config.evaluation_strategy} evaluation requires exactly one horizon."
+        )
+
+    if (
+        config.evaluation_strategy == "staggered_paths"
+        and evaluation_plan is None
+    ):
+        raise ValueError(
+            "evaluation_strategy='staggered_paths' requires a precomputed "
+            "evaluation plan. Call DensityBacktest.plan_cluster() and run the "
+            "resulting jobs."
         )
 
     allowed = None if model_names is None else set(model_names)
@@ -183,7 +197,7 @@ def run_backtest(
     errors = []
 
     effective_strategy = (
-        "all" if config.evaluation_strategy == "shared_path"
+        "all" if config.evaluation_strategy in {"shared_path", "staggered_paths"}
         else config.evaluation_strategy
     )
 

@@ -6,4 +6,4 @@ from .kou import KouModel  # noqa: F401
 from .heston_kou_2f import HestonKou2FModel  # noqa: F401
 from .splines import SplinesModel  # noqa: F401
 from .lognormal_mixture import LognormalMixtureModel  # noqa: F401
-
+from .sanos import SANOSModel  # noqa: F401

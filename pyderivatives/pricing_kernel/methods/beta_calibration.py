@@ -207,12 +207,39 @@ class BetaCalibration(MeasureTransform):
         if not np.isfinite(fitted_model.a) or not np.isfinite(fitted_model.b):
             raise RuntimeError("Beta calibration model is not valid for this maturity.")
 
-        u = np.clip(F_q, self.eps, 1.0 - self.eps)
+        # Do not evaluate the Beta density where the numerical Q-CDF has
+        # saturated at zero or one.  When a < 1 or b < 1, beta.pdf is singular
+        # at the corresponding boundary.  Clipping an exactly saturated CDF to
+        # eps or 1-eps while retaining a nonzero endpoint f_q creates an
+        # artificial density spike at the edge of a finite return grid.
+        u = np.asarray(F_q, dtype=float)
+        interior = (
+            np.isfinite(u)
+            & np.isfinite(f_q)
+            & (u > self.eps)
+            & (u < 1.0 - self.eps)
+        )
 
-        weight = beta_dist.pdf(u, fitted_model.a, fitted_model.b)
-        weight = np.where(np.isfinite(weight) & (weight >= 0), weight, 0.0)
+        if np.count_nonzero(interior) < 2:
+            raise RuntimeError(
+                "Too few interior CDF points to construct the Beta-calibrated "
+                "physical density."
+            )
 
-        f_p_raw = f_q * weight
+        weight = np.zeros_like(f_q, dtype=float)
+        weight[interior] = beta_dist.pdf(
+            u[interior],
+            fitted_model.a,
+            fitted_model.b,
+        )
+        weight = np.where(
+            np.isfinite(weight) & (weight >= 0.0),
+            weight,
+            0.0,
+        )
+
+        f_p_raw = np.zeros_like(f_q, dtype=float)
+        f_p_raw[interior] = f_q[interior] * weight[interior]
         f_p = _trapz_normalize_density(x_grid, f_p_raw, eps=self.eps)
 
         # The analytical calibrated CDF is beta.cdf(F_q), but after grid
@@ -237,6 +264,8 @@ class BetaCalibration(MeasureTransform):
             "a": fitted_model.a,
             "b": fitted_model.b,
             "T_fit": float(T),
+            "beta_interior_mask": interior,
+            "beta_boundary_points_excluded": int(np.count_nonzero(~interior)),
         }
 
 

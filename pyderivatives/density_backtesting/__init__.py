@@ -17,6 +17,13 @@ from .base import (
 
 from .forecast import ForecastDataset
 
+from .scoring import (
+    ScoreConfig,
+    score_density,
+    score_direction,
+    stationarity_diagnostics,
+)
+
 from .models import (
     DensityModel,
     RawRNDModel,
@@ -143,6 +150,10 @@ __all__ = [
     "EvaluationError",
     "TestResult",
     "ForecastDataset",
+    "ScoreConfig",
+    "score_density",
+    "score_direction",
+    "stationarity_diagnostics",
 
     # Models
     "DensityModel",

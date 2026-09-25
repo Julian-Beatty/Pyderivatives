@@ -56,6 +56,8 @@ def plot_pqk_multipanel(
     save: Optional[Union[str, Path]] = None,
     dpi: int = 200,
     legend_loc: str = "upper right",
+    color_map: Optional[Dict[str, str]] = None,
+    rnd_color: str = "0.65",
     show: bool = True,
 ):
     """
@@ -77,6 +79,16 @@ def plot_pqk_multipanel(
 
     x_axis:
         One of {"r", "R", "return", "K"}.
+
+    color_map:
+        Optional mapping from model labels in ``out_dict`` to Matplotlib
+        colors. These colors are used for each model's physical density,
+        pricing kernel, and physical-percentile markers.
+
+    rnd_color:
+        Fixed Matplotlib color used for the common risk-neutral density and
+        risk-neutral percentile markers. The default ``"0.65"`` is a
+        medium-light gray.
     """
     import matplotlib.pyplot as plt
 
@@ -85,6 +97,9 @@ def plot_pqk_multipanel(
 
     if not isinstance(out_dict, dict) or len(out_dict) == 0:
         raise ValueError("out_dict must be a non-empty dictionary.")
+
+    if color_map is not None and not isinstance(color_map, dict):
+        raise TypeError("color_map must be a dictionary or None.")
 
     x_axis = _standardize_x_axis(x_axis)
 
@@ -443,30 +458,40 @@ def plot_pqk_multipanel(
             p_plot = p_ref[xmask_ref]
             M_plot = M_ref[xmask_ref]
 
-            q_legend = f"{q_label} ({model_label})"
+            q_legend = q_label
             p_legend = f"{p_label} ({model_label})"
             m_legend = f"$M$ ({model_label})"
 
-            q_line, = ax.plot(
+            requested_color = (
+                color_map.get(model_label)
+                if color_map is not None
+                else None
+            )
+
+            # The RND is common across models, so keep it visually neutral.
+            ax.plot(
                 X_plot,
                 q_plot,
                 linewidth=lw_density + 0.2,
                 alpha=alpha_density,
+                color=rnd_color,
                 label=q_legend if q_legend not in local_legend_seen else "_nolegend_",
             )
 
             local_legend_seen.add(q_legend)
-            color = q_line.get_color()
 
-            ax.plot(
+            # Let Matplotlib select a model color when one is not supplied.
+            p_line, = ax.plot(
                 X_plot,
                 p_plot,
                 linewidth=lw_density,
-                alpha=0.72,
-                color=color,
+                alpha=alpha_density,
+                color=requested_color,
                 linestyle="-",
                 label=p_legend if p_legend not in local_legend_seen else "_nolegend_",
             )
+
+            model_color = p_line.get_color()
 
             local_legend_seen.add(p_legend)
 
@@ -503,7 +528,7 @@ def plot_pqk_multipanel(
 
                         ax.axvline(
                             xmark,
-                            color=color,
+                            color=rnd_color,
                             linestyle=percentile_linestyle_rnd,
                             alpha=percentile_alpha_rnd,
                             linewidth=percentile_linewidth_rnd,
@@ -539,7 +564,7 @@ def plot_pqk_multipanel(
 
                         ax.axvline(
                             xmark,
-                            color=color,
+                            color=model_color,
                             linestyle=percentile_linestyle_physical,
                             alpha=percentile_alpha_physical,
                             linewidth=percentile_linewidth_physical,
@@ -595,7 +620,7 @@ def plot_pqk_multipanel(
                     linestyle=kernel_linestyle,
                     linewidth=lw_kernel,
                     alpha=alpha_kernel,
-                    color=color,
+                    color=model_color,
                     label=m_legend if m_legend not in local_legend_seen else "_nolegend_",
                 )
 

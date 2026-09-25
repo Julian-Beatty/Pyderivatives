@@ -14,6 +14,7 @@ import pandas as pd
 
 from .forecast import ForecastDataset, stable_hash
 from .models import RawRNDModel, PhysicalDensityModel, TransformRNDModel, _select_maturity_index
+from .staggered_paths import build_staggered_paths
 
 
 def _clean_date(x):
@@ -50,6 +51,7 @@ class ClusterPlan:
     jobs: tuple[BacktestJob, ...]
     plan_hash: str
     evaluation_strategy: str
+    staggered_paths: tuple[tuple[PlannedEvaluation, ...], ...] = ()
 
     @property
     def n_jobs(self) -> int:
@@ -208,6 +210,8 @@ def build_cluster_plan(
         key=lambda x: _clean_date(x.date),
     )
     
+    planned_staggered_paths = ()
+
     if config.evaluation_strategy == "all":
         # Keep every feasible forecast date.
         # StaggeredNonOverlap will construct the non-overlapping
@@ -227,6 +231,54 @@ def build_cluster_plan(
     
             selected.append(item)
             last_end = _clean_date(item.end_date)
+
+    elif config.evaluation_strategy == "staggered_paths":
+        pair_frame = pd.DataFrame(
+            {
+                "date": [_clean_date(item.date) for item in feasible],
+                "end_date": [_clean_date(item.end_date) for item in feasible],
+            }
+        )
+        paths = build_staggered_paths(
+            pair_frame,
+            horizon=horizon,
+            model_names=required,
+            min_obs=int(config.staggered_min_obs),
+        )
+        validation = paths.validate()
+        if not validation.valid:
+            raise RuntimeError(validation.summary())
+
+        by_pair = {
+            (_clean_date(item.date), _clean_date(item.end_date)): item
+            for item in feasible
+        }
+        planned_staggered_paths = tuple(
+            tuple(
+                by_pair[(_clean_date(row.date), _clean_date(row.end_date))]
+                for row in path.pairs.itertuples(index=False)
+            )
+            for path in paths
+        )
+        selected_pairs = {
+            (_clean_date(item.date), _clean_date(item.end_date))
+            for path in planned_staggered_paths
+            for item in path
+        }
+        selected = [
+            item
+            for item in feasible
+            if (_clean_date(item.date), _clean_date(item.end_date))
+            in selected_pairs
+        ]
+
+        print(paths.summary())
+        if validation.unused_pairs:
+            print(
+                "Staggered planner omitted "
+                f"{validation.unused_pairs} feasible pair(s) that could not "
+                "form a retained path."
+            )
     
     else:
         raise ValueError(
@@ -273,6 +325,10 @@ def build_cluster_plan(
         "horizon": horizon,
         "evaluation_strategy": config.evaluation_strategy,
         "evaluations": [x.__dict__ for x in selected],
+        "staggered_paths": [
+            [x.__dict__ for x in path]
+            for path in planned_staggered_paths
+        ],
     }
     print("Evaluation strategy:", config.evaluation_strategy)
     print("Feasible:", len(feasible))
@@ -285,6 +341,7 @@ def build_cluster_plan(
         jobs=tuple(jobs),
         plan_hash=stable_hash(payload),
         evaluation_strategy=config.evaluation_strategy,
+        staggered_paths=planned_staggered_paths,
     )
 
 def run_cluster_job(bundle_path, job_id: int, *, overwrite=False, verbose=True, progress_every=25):
@@ -475,6 +532,9 @@ def merge_cluster_jobs(bundle_path, paths_or_dir, *, require_complete=True, verb
         "complete_path_dates": len(keep),
         "path_reference_model": bundle.plan.reference_model,
         "path_required_models": list(bundle.plan.required_models),
-        "evaluation_strategy_applied": "precomputed_shared_path",
+        "evaluation_strategy_applied": f"precomputed_{bundle.plan.evaluation_strategy}",
+        "planned_staggered_paths": len(
+            getattr(bundle.plan, "staggered_paths", ())
+        ),
     })
     return merged.with_metadata()

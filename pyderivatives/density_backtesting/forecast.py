@@ -13,6 +13,7 @@ import pandas as pd
 
 from .base import EvaluationError, ForecastDensity
 from .provenance import runtime_metadata
+from .scoring import ScoreConfig
 
 
 def _stable_for_hash(obj):
@@ -46,6 +47,7 @@ class ForecastDataset:
     errors: List[EvaluationError] = field(default_factory=list)
     config: Any = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    scoring_config: ScoreConfig = field(default_factory=ScoreConfig)
 
     def evaluate(self, tests=None):
         from .report import evaluate_dataset
@@ -68,14 +70,17 @@ class ForecastDataset:
     def to_frame(self) -> pd.DataFrame:
         rows = []
 
+        scoring_config = getattr(self, "scoring_config", ScoreConfig())
+
         for f in self.forecasts:
+            score_values = f.scores(scoring_config)
             rows.append({
                 "date": pd.Timestamp(f.date),
                 "model": f.model_name,
                 "horizon": int(f.horizon),
                 "realized": f.realized,
                 "pit": f.pit,
-                "log_score": f.log_score,
+                **score_values,
                 **f.metadata,
             })
 
@@ -383,17 +388,49 @@ class ForecastDataset:
 
         return out.reset_index()
 
-    def score_summary(self) -> pd.DataFrame:
+    def score_summary(
+        self,
+        score: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """Summarize one score or every available score column.
+
+        Score columns are oriented so larger is better; loss columns retain
+        their conventional lower-is-better orientation.
+        """
         df = self.to_frame()
 
         if df.empty:
             return pd.DataFrame()
 
+        score_columns = [
+            c for c in df.columns
+            if c == "log_score" or c.endswith("_score") or c.endswith("_loss")
+        ]
+        if score is not None:
+            if score not in score_columns:
+                raise KeyError(
+                    f"Unknown score {score!r}. Available scores: {score_columns}"
+                )
+            score_columns = [score]
+
+        rows = []
+        for column in score_columns:
+            grouped = (
+                df.groupby(["model", "horizon"])[column]
+                .agg(["sum", "mean", "median", "std", "count"])
+                .reset_index()
+            )
+            grouped.insert(2, "score", column)
+            grouped["higher_is_better"] = not column.endswith("_loss")
+            rows.append(grouped)
+
+        if not rows:
+            return pd.DataFrame()
+
         return (
-            df.groupby(["model", "horizon"])["log_score"]
-            .agg(["sum", "mean", "median", "std", "count"])
-            .sort_values(["horizon", "mean"], ascending=[True, False])
-            .reset_index()
+            pd.concat(rows, ignore_index=True)
+            .sort_values(["horizon", "score", "mean"], ascending=[True, True, False])
+            .reset_index(drop=True)
         )
 
     def pit_summary(self) -> pd.DataFrame:
@@ -474,6 +511,7 @@ class ForecastDataset:
                 "subset_start_date": None if start_date is None else str(start_date),
                 "subset_end_date": None if end_date is None else str(end_date),
             },
+            scoring_config=getattr(self, "scoring_config", ScoreConfig()),
         ).with_metadata()
 
     @classmethod
@@ -482,10 +520,17 @@ class ForecastDataset:
         errors = []
         config = None
         metadata = {"n_parts": len(parts)}
+        scoring_config = None
 
         for part in parts:
             forecasts.extend(part.forecasts)
             errors.extend(part.errors)
+
+            part_scoring = getattr(part, "scoring_config", ScoreConfig())
+            if scoring_config is None:
+                scoring_config = part_scoring
+            elif part_scoring != scoring_config:
+                raise ValueError("Cannot combine parts with different scoring_config values.")
 
             if config is None:
                 config = part.config
@@ -508,4 +553,5 @@ class ForecastDataset:
             errors=errors,
             config=config,
             metadata=metadata,
+            scoring_config=scoring_config or ScoreConfig(),
         ).with_metadata()

@@ -179,6 +179,13 @@ class NonparametricCalibrationSpec:
     min_bandwidth: float = 1e-3
     max_bandwidth: Optional[float] = None
 
+    # Statistical tail regularization for PIT calibration.
+    #
+    # This is intentionally separate from the transform's numerical `eps`.
+    # Exact or near-exact PITs of 0/1 map to extreme normal scores and can
+    # create explosive h(z) / phi(z) calibration ratios.
+    pit_clip: float = 1e-3
+
 
 # ============================================================
 # Runtime and infrastructure specifications

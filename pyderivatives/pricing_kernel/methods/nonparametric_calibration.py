@@ -95,6 +95,23 @@ class NonparametricCalibration(MeasureTransform):
         from scipy.stats import norm
         return norm.ppf(u)
 
+    def _pit_clip_value(self) -> float:
+        """
+        Return the statistical PIT clipping level used by this transform.
+
+        `pit_clip` is distinct from `eps`: it regularizes the tails of the
+        calibration map, whereas `eps` is reserved for numerical protection.
+        """
+        clip = float(self.spec.pit_clip)
+
+        if not np.isfinite(clip) or clip <= 0.0 or clip >= 0.5:
+            raise ValueError(
+                "NonparametricCalibrationSpec.pit_clip must lie strictly "
+                "between 0 and 0.5."
+            )
+
+        return clip
+
     def _select_bandwidth(self, z: np.ndarray) -> Tuple[float, str]:
         z = _as_1d(z)
         n = z.size
@@ -144,8 +161,16 @@ class NonparametricCalibration(MeasureTransform):
         return {"spec": self.spec}
 
     def _fit_one_maturity(self, hist_T: pd.DataFrame, *, T: float):
-        u = np.asarray(hist_T["pit"], dtype=float)
-        u = np.clip(u[np.isfinite(u)], self.eps, 1.0 - self.eps)
+        u_raw = np.asarray(hist_T["pit"], dtype=float)
+        u_raw = u_raw[np.isfinite(u_raw)]
+
+        pit_clip = self._pit_clip_value()
+
+        # Record how often the empirical PITs hit the regularized tails.
+        n_clip_left = int(np.sum(u_raw < pit_clip))
+        n_clip_right = int(np.sum(u_raw > 1.0 - pit_clip))
+
+        u = np.clip(u_raw, pit_clip, 1.0 - pit_clip)
 
         if u.size < self.min_obs:
             fitted = NonparametricCalibrationFitted(
@@ -239,6 +264,9 @@ class NonparametricCalibration(MeasureTransform):
                 "n_z": int(z_obs.size),
                 "z_min": float(z_min),
                 "z_max": float(z_max),
+                "pit_clip": float(pit_clip),
+                "pit_clip_left_count": int(n_clip_left),
+                "pit_clip_right_count": int(n_clip_right),
             },
         }
         return fitted, diag
@@ -260,7 +288,12 @@ class NonparametricCalibration(MeasureTransform):
         if fitted_model.z_grid.size < 2:
             raise RuntimeError("Nonparametric calibration model is not valid for this maturity.")
 
-        u = np.clip(F_q, self.eps, 1.0 - self.eps)
+        pit_clip = self._pit_clip_value()
+
+        # Apply the same statistical tail regularization used during fitting.
+        # This prevents F_Q values extremely close to 0/1 from creating
+        # pathological normal scores and explosive h(z) / phi(z) ratios.
+        u = np.clip(F_q, pit_clip, 1.0 - pit_clip)
         z = self._normal_ppf(u)
 
         h_z = np.interp(
@@ -308,5 +341,6 @@ class NonparametricCalibration(MeasureTransform):
             "H_z": H_z,
             "bandwidth": fitted_model.bandwidth,
             "bandwidth_method": fitted_model.bandwidth_method,
+            "pit_clip": float(pit_clip),
             "T_fit": float(T),
         }

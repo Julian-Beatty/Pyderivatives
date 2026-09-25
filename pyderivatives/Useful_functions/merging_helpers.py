@@ -6,6 +6,11 @@ from pathlib import Path
 import pandas as pd
 from pyderivatives.global_pricer.data import CallSurfaceDay
 from pyderivatives import *
+
+import pandas as pd
+
+from copy import deepcopy
+
 def merge_calibration_pickles(
     folder,
     pattern="*.pkl",
@@ -1023,8 +1028,163 @@ def quick_calibrate(
 
     return RND_today
 
-import pandas as pd
 
+
+def merge_option_markets(
+    option_df1: pd.DataFrame,
+    market1,
+    option_df2: pd.DataFrame,
+    market2,
+    *,
+    overlap_preference: str = "first",
+):
+    """
+    Merge two standardized option markets for the same underlying.
+
+    Parameters
+    ----------
+    option_df1, option_df2
+        Standardized option DataFrames returned by quick_option_market().
+
+    market1, market2
+        OptionMarketStandardizer objects returned by quick_option_market().
+
+    overlap_preference
+        Which market to keep when both contain the same contract:
+
+        - "first": keep market1
+        - "second": keep market2
+
+    Returns
+    -------
+    merged_df
+        Merged quick_option_market DataFrame.
+
+    merged_market
+        Copy of market1 whose opt_std contains the merged standardized
+        option market.
+    """
+    preference = overlap_preference.strip().lower()
+
+    if preference not in {"first", "second"}:
+        raise ValueError(
+            "overlap_preference must be either 'first' or 'second'."
+        )
+
+    contract_keys = [
+        "date",
+        "exdate",
+        "option_right",
+        "strike",
+    ]
+
+    def normalize(df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+
+        missing = set(contract_keys) - set(out.columns)
+        if missing:
+            raise ValueError(
+                f"Option DataFrame is missing columns: {sorted(missing)}"
+            )
+
+        out["date"] = pd.to_datetime(
+            out["date"],
+            errors="coerce",
+        ).dt.normalize()
+
+        out["exdate"] = pd.to_datetime(
+            out["exdate"],
+            errors="coerce",
+        ).dt.normalize()
+
+        out["option_right"] = (
+            out["option_right"]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .str[0]
+        )
+
+        out["strike"] = pd.to_numeric(
+            out["strike"],
+            errors="coerce",
+        )
+
+        return out.dropna(subset=contract_keys)
+
+    def combine(
+        first: pd.DataFrame,
+        second: pd.DataFrame,
+    ) -> pd.DataFrame:
+        first = normalize(first)
+        second = normalize(second)
+
+        combined = pd.concat(
+            [first, second],
+            ignore_index=True,
+            sort=False,
+        )
+
+        # concat puts market1 first and market2 second.
+        # keep="first" therefore favors market1.
+        keep = "first" if preference == "first" else "last"
+
+        combined = combined.drop_duplicates(
+            subset=contract_keys,
+            keep=keep,
+        )
+
+        sort_columns = [
+            column
+            for column in [
+                "date",
+                "rounded_maturity",
+                "exdate",
+                "option_right",
+                "strike",
+            ]
+            if column in combined.columns
+        ]
+
+        return (
+            combined
+            .sort_values(sort_columns)
+            .reset_index(drop=True)
+        )
+
+    # Merge the OTM/parity-adjusted DataFrames returned by
+    # quick_option_market().
+    merged_df = combine(option_df1, option_df2)
+
+    # Merge the complete standardized option markets.
+    if market1.opt_std is None or market2.opt_std is None:
+        raise ValueError(
+            "Both market objects must have a populated opt_std DataFrame."
+        )
+
+    merged_market = deepcopy(market1)
+    merged_market.opt_std = combine(
+        market1.opt_std,
+        market2.opt_std,
+    )
+
+    # Preserve both raw option datasets where possible.
+    raw_frames = []
+
+    if getattr(market1, "options_raw", None) is not None:
+        raw_frames.append(market1.options_raw.copy())
+
+    if getattr(market2, "options_raw", None) is not None:
+        raw_frames.append(market2.options_raw.copy())
+
+    if raw_frames:
+        merged_market.options_raw = pd.concat(
+            raw_frames,
+            ignore_index=True,
+            sort=False,
+        )
+
+    return merged_df, merged_market
 def slice_dict_by_date(rnd_dict, start_date=None, end_date=None):
     """
     Slice a dictionary whose keys are dates.

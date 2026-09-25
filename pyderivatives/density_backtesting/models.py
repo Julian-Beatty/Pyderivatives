@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import copy
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Sequence
 
@@ -652,6 +653,16 @@ class TransformRNDModel(DensityModel):
         default=None, init=False, repr=False, compare=False
     )
 
+    # With a fixed calibration window, different forecast dates may select
+    # different maturities. Cache one fitted transform per selected maturity so
+    # a 27d calibration is never reused for (say) a 33d forecast.
+    _fixed_fitted_by_maturity: Dict[float, Any] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
+    _fixed_metadata_by_maturity: Dict[float, Dict[str, Any]] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
+
     def _rnd_by_date(self, market_data: MarketData):
         if self.rnd_key not in market_data.rnd_dicts:
             raise KeyError(
@@ -745,6 +756,7 @@ class TransformRNDModel(DensityModel):
         *,
         date: pd.Timestamp,
         market_data: MarketData,
+        evaluation_maturity: Optional[float] = None,
     ) -> dict:
         if self.transform is None:
             raise ValueError("transform cannot be None.")
@@ -766,6 +778,24 @@ class TransformRNDModel(DensityModel):
             transform_kwargs = cfg.transform_kwargs()
             stock_df = self._stock_df_for_transform(market_data)
 
+            # Fit the Q-to-P calibration only at the maturity selected for this
+            # forecast. This avoids fitting every tenor and prevents calibration
+            # estimated at one horizon from being applied to another RND horizon.
+            #
+            # Use a local copy so the model specification remains unchanged for
+            # subsequent forecast dates, whose selected maturity may differ.
+            transform_for_fit = self.transform
+            if evaluation_maturity is not None:
+                transform_for_fit = copy.deepcopy(self.transform)
+                transform_for_fit.fit_maturities = [float(evaluation_maturity)]
+
+                # The requested calibration maturity should be the same selected
+                # tenor, not merely another nearby tenor. A half-day tolerance
+                # accommodates harmless floating-point/date-grid representation
+                # differences while still preventing a one-day maturity mismatch.
+                exact_maturity_tol = 0.51 / 365.0
+                transform_for_fit.maturity_match_tol = exact_maturity_tol
+
             # When only a ReturnSeries is available, tell MeasureTransform.fit
             # to use the synthetic return column instead of searching for price.
             if market_data.stock_df is None:
@@ -781,32 +811,59 @@ class TransformRNDModel(DensityModel):
                 transform_kwargs["fit_kwargs"] = fit_kwargs
 
             if cfg.mode == "fixed":
-                if self._fixed_fitted_transform is None:
-                    fit_args = dict(transform_kwargs)
-                    fit_args.pop("mode", None)
+                fit_args = dict(transform_kwargs)
+                fit_args.pop("mode", None)
 
-                    fitted, window_metadata = fit_transform_window(
-                        transform=self.transform,
-                        rnd_history_dict=rnd_by_date,
-                        stock_df=stock_df,
-                        target_date=None,
-                        mode="fixed",
-                        verbose=False,
-                        **fit_args,
+                if evaluation_maturity is None:
+                    # Backward-compatible fixed-window behavior when no dynamic
+                    # evaluation maturity has been requested.
+                    if self._fixed_fitted_transform is None:
+                        fitted, window_metadata = fit_transform_window(
+                            transform=transform_for_fit,
+                            rnd_history_dict=rnd_by_date,
+                            stock_df=stock_df,
+                            target_date=None,
+                            mode="fixed",
+                            verbose=False,
+                            **fit_args,
+                        )
+                        self._fixed_fitted_transform = fitted
+                        self._fixed_window_metadata = dict(window_metadata)
+
+                    fitted_transform = self._fixed_fitted_transform
+                    fixed_metadata = dict(self._fixed_window_metadata or {})
+                else:
+                    # Cache a distinct fixed-window fit for every selected
+                    # maturity encountered by the backtest.
+                    maturity_key = round(float(evaluation_maturity), 12)
+                    if maturity_key not in self._fixed_fitted_by_maturity:
+                        fitted, window_metadata = fit_transform_window(
+                            transform=transform_for_fit,
+                            rnd_history_dict=rnd_by_date,
+                            stock_df=stock_df,
+                            target_date=None,
+                            mode="fixed",
+                            verbose=False,
+                            **fit_args,
+                        )
+                        self._fixed_fitted_by_maturity[maturity_key] = fitted
+                        self._fixed_metadata_by_maturity[maturity_key] = dict(
+                            window_metadata
+                        )
+
+                    fitted_transform = self._fixed_fitted_by_maturity[maturity_key]
+                    fixed_metadata = dict(
+                        self._fixed_metadata_by_maturity[maturity_key]
                     )
-                    self._fixed_fitted_transform = fitted
-                    self._fixed_window_metadata = dict(window_metadata)
 
-                physical = self._fixed_fitted_transform.transform_rnd(info)
+                physical = fitted_transform.transform_rnd(info)
                 physical.setdefault("window_fit", {})
-                physical["window_fit"].update(
-                    dict(self._fixed_window_metadata or {})
-                )
+                physical["window_fit"].update(fixed_metadata)
                 physical["window_fit"]["target_date"] = date
                 physical["window_fit"]["reused_fitted_transform"] = True
             else:
                 physical = transform_one_date(
-                    transform=self.transform,
+                    transform=transform_for_fit,
                     rnd_history_dict=rnd_by_date,
                     stock_df=stock_df,
                     target_date=date,
@@ -816,6 +873,17 @@ class TransformRNDModel(DensityModel):
 
         # Preserve observed maturity information for nearest_observed mode.
         physical.setdefault("day", info.get("day", {}))
+
+        # Record the date-specific maturity used for fitting so downstream
+        # diagnostics can verify that calibration and evaluation maturities match.
+        if evaluation_maturity is not None:
+            physical.setdefault("window_fit", {})
+            physical["window_fit"]["evaluation_maturity_fit"] = float(evaluation_maturity)
+            physical["window_fit"]["evaluation_maturity_fit_days"] = float(
+                365.0 * evaluation_maturity
+            )
+            physical["window_fit"]["evaluation_maturity_fit_tolerance_days"] = 0.51
+
         return physical
 
     def forecast_one(
@@ -828,9 +896,37 @@ class TransformRNDModel(DensityModel):
         config: EvaluationConfig,
     ) -> ForecastDensity:
         target_maturity = float(getattr(config, "_override_target_maturity", config.target_maturity_for_horizon(horizon_days)))
+
+        # Select the maturity from the original RND before fitting the transform.
+        # Under nearest_observed this is an observed tenor; under target_grid it
+        # is the selected interpolated-grid tenor. It is the curve being scored.
+        rnd_by_date = self._rnd_by_date(market_data)
+        info = rnd_by_date[pd.Timestamp(date).tz_localize(None)]
+        _, selected_maturity = _select_maturity_index(
+            info,
+            target_maturity,
+            config.maturity_match_tol,
+            config=config,
+        )
+        if selected_maturity is None:
+            raise ValueError("No RND maturity within tolerance before transformation.")
+
+        # Every fitted transform is scored at one selected maturity, regardless
+        # of whether that tenor came from the interpolated target grid or the
+        # observed maturity grid.  Restrict fitting to that tenor so a 30-day
+        # backtest does not refit the complete 5--60 day physical surface.
+        # Non-fitted transforms such as Ross Recovery retain their full-surface
+        # input because their method itself may require cross-maturity data.
+        evaluation_maturity = (
+            float(selected_maturity)
+            if self.requires_fit
+            else None
+        )
+
         physical = self._transform_for_date(
             date=date,
             market_data=market_data,
+            evaluation_maturity=evaluation_maturity,
         )
 
         j, T_actual = _select_maturity_index(
@@ -841,6 +937,15 @@ class TransformRNDModel(DensityModel):
         )
         if j is None:
             raise ValueError("No transformed maturity within tolerance.")
+
+        if evaluation_maturity is not None:
+            maturity_error_days = abs(float(T_actual) - float(evaluation_maturity)) * 365.0
+            if maturity_error_days > 0.51:
+                raise RuntimeError(
+                    "Transformed maturity does not match the maturity selected "
+                    f"before calibration: selected={365.0 * evaluation_maturity:.6g}d, "
+                    f"transformed={365.0 * T_actual:.6g}d."
+                )
 
         fitted_params = self._fitted_params_from_output(physical, T_actual)
         realized_horizon_days = int(round(365 * T_actual))
@@ -875,6 +980,12 @@ class TransformRNDModel(DensityModel):
                 "target_maturity": target_maturity,
                 "target_horizon_days": int(horizon_days),
                 "T_actual": T_actual,
+                "calibration_target_T": (
+                    None if evaluation_maturity is None else float(evaluation_maturity)
+                ),
+                "calibration_target_days": (
+                    None if evaluation_maturity is None else float(365.0 * evaluation_maturity)
+                ),
                 "realized_horizon_days": int(realized_horizon_days),
                 "maturity_selection": getattr(
                     config, "maturity_selection", "target_grid"

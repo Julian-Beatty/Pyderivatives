@@ -186,6 +186,56 @@ def iv_surface_from_calls(
                 reject_low_vega=float(cfg.reject_low_vega),
             )
     return out
+
+
+def atm_iv_term_structure_from_calls(
+    C_atm: np.ndarray,
+    *,
+    K_atm: np.ndarray,
+    T_grid: np.ndarray,
+    S0: float,
+    r: float,
+    q: float = 0.0,
+    cfg: IVConfig = IVConfig(),
+) -> dict[str, np.ndarray]:
+    """Invert one ATM-forward call price at each requested maturity.
+
+    ``K_atm`` should normally be ``S0 * exp((r - q) * T_grid)``.  Keeping
+    this as a one-dimensional operation avoids constructing and retaining a
+    full implied-volatility surface when only its ATM term structure is used.
+    """
+    C_atm = np.asarray(C_atm, float).ravel()
+    K_atm = np.asarray(K_atm, float).ravel()
+    T_grid = np.asarray(T_grid, float).ravel()
+    if not (C_atm.size == K_atm.size == T_grid.size):
+        raise ValueError("C_atm, K_atm, and T_grid must have the same length.")
+
+    atm_iv = np.full(T_grid.size, np.nan, dtype=float)
+    for i, (call, strike, maturity) in enumerate(zip(C_atm, K_atm, T_grid)):
+        atm_iv[i] = implied_vol_call_newton_brent(
+            float(call),
+            S0=float(S0),
+            K=float(strike),
+            T=float(maturity),
+            r=float(r),
+            q=float(q),
+            sigma_init=float(cfg.sigma_init),
+            sigma_lo=float(cfg.sigma_lo),
+            sigma_hi=float(cfg.sigma_hi),
+            newton_max_iter=int(cfg.newton_max_iter),
+            newton_tol=float(cfg.newton_tol),
+            vega_floor=float(cfg.vega_floor),
+            brent_maxiter=int(cfg.brent_maxiter),
+            time_value_floor=float(cfg.time_value_floor),
+            reject_low_vega=float(cfg.reject_low_vega),
+        )
+
+    return {
+        "T": T_grid.copy(),
+        "days": np.rint(365.0 * T_grid).astype(int),
+        "K_atm": K_atm.copy(),
+        "atm_iv": atm_iv,
+    }
 import numpy as np
 from typing import Dict, Optional
 

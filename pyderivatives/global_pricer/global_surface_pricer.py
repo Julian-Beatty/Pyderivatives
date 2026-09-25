@@ -22,6 +22,7 @@ from .postprocess.rnd import (
 from .postprocess.iv import (
     IVConfig,
     iv_surface_from_calls,
+    atm_iv_term_structure_from_calls,
     atm_summary_from_iv_surface,
     iv_surface_to_delta_surfaces,
     bs_gamma_surface_from_iv,
@@ -53,10 +54,21 @@ class GlobalSurfacePricer:
       2) price(day, ...) -> evaluates C_fit on requested grids, plus optional post-processing
     """
 
-    def __init__(self, model_name: str, *, Umax: float = 500.0, n_quad: int = 500):
+    def __init__(
+        self,
+        model_name: str,
+        *,
+        Umax: float = 500.0,
+        n_quad: int = 500,
+        min_observed_quotes: int = 0,
+    ):
         self.model_name = str(model_name)
         self.Umax = float(Umax)
         self.n_quad = int(n_quad)
+
+        self.min_observed_quotes = int(min_observed_quotes)
+        if self.min_observed_quotes < 0:
+            raise ValueError("min_observed_quotes must be >= 0.")
 
         self.model_ = None          # instantiated ModelCls(S0,r,q,...) after fit
         self.state_: Optional[FitState] = None
@@ -144,12 +156,43 @@ class GlobalSurfacePricer:
         bounds=None,
         max_nfev: int = 250,
         q_override: Optional[float] = None,
+        min_observed_quotes: Optional[int] = None,
     ) -> FitState:
         """
         Fit model parameters to observed (K_obs, T_obs, C_obs).
+
+        Parameters
+        ----------
+        min_observed_quotes
+            Optional per-fit override for the constructor-level minimum.
+            If the usable call surface has fewer quotes than the resolved
+            minimum, calibration is rejected with ValueError before the
+            selected model is instantiated.
+
         Stores fitted params and model instance on self.
         """
         q_use = float(day.q) if q_override is None else float(q_override)
+
+        min_quotes = (
+            self.min_observed_quotes
+            if min_observed_quotes is None
+            else int(min_observed_quotes)
+        )
+        if min_quotes < 0:
+            raise ValueError("min_observed_quotes must be >= 0.")
+
+        n_obs = int(np.asarray(day.C_obs).size)
+        if n_obs < min_quotes:
+            date_label = (
+                str(day.date.date())
+                if getattr(day, "date", None) is not None
+                else "unknown date"
+            )
+            raise ValueError(
+                f"Skipping {self.model_name} calibration for {date_label}: "
+                f"only {n_obs} observed call quotes are available, "
+                f"but min_observed_quotes={min_quotes}."
+            )
 
         ModelCls = get_model(self.model_name)
         model = ModelCls(S0=float(day.S0), r=float(day.r), q=q_use, Umax=self.Umax, n_quad=self.n_quad)
@@ -175,6 +218,7 @@ class GlobalSurfacePricer:
                 "n_quad": self.n_quad,
                 "max_nfev": int(max_nfev),
                 "n_obs": int(np.asarray(day.C_obs).size),
+                "min_observed_quotes": int(min_quotes),
             },
         )
 
@@ -197,6 +241,7 @@ class GlobalSurfacePricer:
         compute_rnd: bool = False,
         safety_clip: Optional[SafetyClipConfig] = None,
         compute_iv: bool = False,
+        compute_iv_atm_only: bool = False,
         compute_cdf: bool = False,
         compute_moments: bool = False,
         compute_obs_reprice: bool = True,
@@ -206,6 +251,7 @@ class GlobalSurfacePricer:
         cdf_cfg: Optional[CDFConfig] = None,
         params_override: Optional[Dict[str, float]] = None,
         compute_gamma: bool = False,
+        retain_call_surface: bool = True,
     ) -> Dict[str, Any]:
     
         if self.model_ is None or self.state_ is None:
@@ -235,7 +281,25 @@ class GlobalSurfacePricer:
             else {str(k): float(v) for k, v in params_override.items()}
         )
     
-        C_fit = self.model_.price_surface(K_grid, T_grid, params)
+        if compute_iv and compute_iv_atm_only:
+            raise ValueError(
+                "compute_iv and compute_iv_atm_only are mutually exclusive."
+            )
+        if compute_iv_atm_only and (compute_delta or compute_gamma):
+            raise ValueError(
+                "compute_delta and compute_gamma require compute_iv=True; "
+                "they cannot be computed from an ATM-only term structure."
+            )
+
+        # Skip the rectangular call surface entirely for the lightweight
+        # ATM-only use case. RND and full-IV calculations still construct it as
+        # a temporary even when it is not retained in the result.
+        need_call_surface = bool(retain_call_surface or compute_rnd or compute_iv)
+        C_fit = (
+            self.model_.price_surface(K_grid, T_grid, params)
+            if need_call_surface
+            else None
+        )
     
         q_use = float(self.day_meta_["q"]) if self.day_meta_ else float(day.q)
         date_use = getattr(day, "date", None)
@@ -251,7 +315,6 @@ class GlobalSurfacePricer:
             "ticker": getattr(day, "ticker", "Unknown"),
             "grid_k": K_grid,
             "T_grid": T_grid,
-            "C_fit": np.asarray(C_fit, float),
             "meta": dict(self.state_.fit_meta),
             "day": {
                 "date": date_use,
@@ -265,10 +328,14 @@ class GlobalSurfacePricer:
             },
             "bounds_spec": self.bounds,
         }
+        if retain_call_surface:
+            assert C_fit is not None
+            out["C_fit"] = np.asarray(C_fit, float)
     
         if compute_rnd:
+            assert C_fit is not None
             rnd_raw = breeden_litzenberger_pdf(
-                out["C_fit"],
+                C_fit,
                 K_grid=out["grid_k"],
                 T_grid=T_grid,
                 r=float(day.r),
@@ -328,6 +395,7 @@ class GlobalSurfacePricer:
                 )
     
         if compute_iv:
+            assert C_fit is not None
             cfg_iv = iv_cfg if iv_cfg is not None else IVConfig()
     
             iv_surf = iv_surface_from_calls(
@@ -367,6 +435,29 @@ class GlobalSurfacePricer:
                     S0=float(day.S0),
                     r=float(day.r),
                 )
+
+        if compute_iv_atm_only:
+            cfg_iv = iv_cfg if iv_cfg is not None else IVConfig()
+            atm_strikes = float(day.S0) * np.exp(
+                (float(day.r) - float(q_use)) * T_grid
+            )
+            atm_calls = np.empty(T_grid.size, dtype=float)
+            for i, (strike, maturity) in enumerate(zip(atm_strikes, T_grid)):
+                atm_calls[i] = np.asarray(
+                    self.model_.call_prices(
+                        np.array([float(strike)]), float(maturity), params
+                    ),
+                    dtype=float,
+                ).ravel()[0]
+            out["atm_iv_term_structure"] = atm_iv_term_structure_from_calls(
+                atm_calls,
+                K_atm=atm_strikes,
+                T_grid=T_grid,
+                S0=float(day.S0),
+                r=float(day.r),
+                q=float(q_use),
+                cfg=cfg_iv,
+            )
     
         if compute_cdf:
             if "rnd_k_surface" not in out:
@@ -406,7 +497,13 @@ class GlobalSurfacePricer:
         Anything fit-related still needs to be passed under the same names.
         """
         # split kwargs into fit vs price buckets (simple, explicit)
-        fit_keys = {"x0", "bounds", "max_nfev", "q_override"}
+        fit_keys = {
+            "x0",
+            "bounds",
+            "max_nfev",
+            "q_override",
+            "min_observed_quotes",
+        }
         fit_kwargs = {k: kwargs.pop(k) for k in list(kwargs.keys()) if k in fit_keys}
 
         self.fit(day, **fit_kwargs)
